@@ -52,15 +52,16 @@ import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec } from './types.ts'
 
 export const name = 'ego-browser'
-// Platform-aware host services: the web shell exposes `webServer`, other Web
-// hosts expose `httpServer`. Declare both as optional so the plugin mounts on
-// either runner; initCastServer picks whichever one is present.
-// cordis 0.1.0 requires a plain string array (the object-optional syntax it
-// previously used is unsupported and broke cast-server registration — the
-// 2026-08-13 regression). Declaring the HTTP service as a plain string is how
-// every working host plugin (aionui-panel, client-connection, web-app) does it:
-// plain-string services resolve through fiber.store, keeping ctx.webServer
-// reachable so initCastServer can re-register the /api/ego/* watch routes.
+// Host services: this build targets the DSH Web shell, whose `webServer`
+// service backs both the settings gateway (/ego/api/*) and the cast-server
+// watch panel (/api/ego/*). NOTE: these are HARD dependencies, not optional —
+// cordis 0.1.0 only supports plain-string inject arrays (the object-optional
+// syntax broke cast-server registration in the 2026-08-13 regression), and
+// plain strings resolve through fiber.store with wait-until-available
+// semantics: on a runner without `webServer` this plugin would stay pending
+// rather than degrade gracefully. Every working host plugin (aionui-panel,
+// client-connection, web-app) makes the same trade. initCastServer still
+// null-guards the resolved service defensively at apply() time.
 export const inject = ['tools', 'subprocess', 'webServer']
 // Schemastery schema for the composition entry and the `ego-browser` settings
 // namespace. Re-exported from config.ts so cordis's loader validates the

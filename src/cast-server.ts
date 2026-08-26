@@ -33,6 +33,27 @@ export const EGO_WATCH_STATUS_ROUTE = '/api/ego/watch/status'
 export const EGO_VIDEO_ROUTE = '/api/ego/video'
 export const EGO_VIDEO_STATUS_ROUTE = '/api/ego/video/status'
 
+/**
+ * Same-origin gate mirroring gateway.ts: a browser request that carries an
+ * Origin header must match the Host the DSH shell serves on, otherwise a
+ * malicious page could drive the user's agent browser through these local
+ * endpoints (/api/ego/input in particular). Requests WITHOUT an Origin header
+ * (curl, health probes, same-origin top-level GETs) pass through.
+ */
+export function sameOriginOk(req: { headers?: Record<string, unknown> }): boolean {
+  const pick = (v: unknown): unknown => (Array.isArray(v) ? v[0] : v)
+  const origin = pick(req.headers?.origin)
+  if (typeof origin !== 'string' || origin === '') return true
+  let originHost: string
+  try {
+    originHost = new URL(origin).host
+  } catch {
+    return false
+  }
+  const host = pick(req.headers?.host)
+  return typeof host === 'string' && host !== '' && originHost === host
+}
+
 // ── tool-call signal (auto-open sidebar Tab) ─────────────────────────────
 // Module-level counter bumped by markEgoToolCall() from the tool execute
 // path (src/index.ts: defineEgoTool). When a new tool call lands, we
@@ -455,6 +476,21 @@ export function initCastServer(
     return
   }
 
+  // Every route below rejects cross-origin browsers up front: a hostile page
+  // in ANY tab must not be able to POST /api/ego/input|close|flush against the
+  // agent's live session just because the port is localhost.
+  const rawRegister = server.register.bind(server)
+  const register = ((opts: Parameters<typeof rawRegister>[0]) => {
+    const inner = opts.handler
+    const guarded: typeof inner = async (req, res) => {
+      if (!sameOriginOk(req as IncomingMessage)) {
+        return sendJson(res as ServerResponse, 403, { ok: false, error: 'origin-not-allowed' })
+      }
+      return inner(req, res)
+    }
+    return rawRegister({ ...opts, handler: guarded })
+  }) as typeof server.register
+
   // Hot-push config changes to a running worker. The settings bridge fires
   // onChange whenever the user saves a new castFpsCap / screencastQuality /
   // screencastMaxWidth in the settings card.
@@ -473,7 +509,7 @@ export function initCastServer(
     }
   }
 
-  const disposeSpaces = server.register({
+  const disposeSpaces = register({
     kind: 'exact',
     path: EGO_SPACES_ROUTE,
     handler: async (_req: unknown, resRaw: unknown) => {
@@ -493,7 +529,7 @@ export function initCastServer(
   // GET /api/ego/stream — Server-Sent Events: real-time screencast frames and
   // the live tab/spaces list. The web shell supports exact HTTP routes and this
   // handler keeps the connection open for the worker->panel fan-out.
-  const disposeStream = server.register({
+  const disposeStream = register({
     kind: 'exact',
     path: EGO_STREAM_ROUTE,
     handler: async (_req: unknown, resRaw: unknown) => {
@@ -510,7 +546,7 @@ export function initCastServer(
   // POST /api/ego/input — forward a watch-panel pointer/wheel intention to the
   // real agent page. Coordinates are already in browser CSS pixels (the panel
   // maps them). The web shell passes the raw body through to the worker.
-  const disposeInput = server.register({
+  const disposeInput = register({
     kind: 'exact',
     path: EGO_INPUT_ROUTE,
     handler: async (reqRaw: unknown, resRaw: unknown) => {
@@ -526,7 +562,7 @@ export function initCastServer(
   })
 
   // POST /api/ego/close — close a browser tab by targetId.
-  const disposeClose = server.register({
+  const disposeClose = register({
     kind: 'exact',
     path: EGO_CLOSE_ROUTE,
     handler: async (reqRaw: unknown, resRaw: unknown) => {
@@ -545,7 +581,7 @@ export function initCastServer(
   })
 
   // POST /api/ego/flush — force login cookies down to the disk profile.
-  const disposeFlush = server.register({
+  const disposeFlush = register({
     kind: 'exact',
     path: EGO_FLUSH_ROUTE,
     handler: async (_req: unknown, resRaw: unknown) => {
@@ -558,7 +594,7 @@ export function initCastServer(
     },
   })
 
-  const disposeHealth = server.register({
+  const disposeHealth = register({
     kind: 'exact',
     path: EGO_HEALTH_ROUTE,
     handler: async (_req: unknown, resRaw: unknown) => {
@@ -574,7 +610,7 @@ export function initCastServer(
     [EGO_WATCH_START_ROUTE, '/api/watch/start'],
     [EGO_WATCH_SWITCH_ROUTE, '/api/watch/switch'],
     [EGO_WATCH_STOP_ROUTE, '/api/watch/stop'],
-  ].map(([path, workerPath]) => server.register!({
+  ].map(([path, workerPath]) => register!({
     kind: 'exact', path,
     handler: async (reqRaw: unknown, resRaw: unknown) => {
       const req = reqRaw as IncomingMessage
@@ -588,7 +624,7 @@ export function initCastServer(
         : sendJson(res, 502, { ok: false, error: 'worker request failed' })
     },
   }))
-  const disposeWatchStatus = server.register({
+  const disposeWatchStatus = register({
     kind: 'exact', path: EGO_WATCH_STATUS_ROUTE,
     handler: async (_req: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
@@ -597,7 +633,7 @@ export function initCastServer(
       return sendJson(res, 200, result || { ok: false, state: 'idle', reason: 'worker not ready' })
     },
   })
-  const disposeVideoStatus = server.register({
+  const disposeVideoStatus = register({
     kind: 'exact', path: EGO_VIDEO_STATUS_ROUTE,
     handler: async (_req: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
@@ -606,7 +642,7 @@ export function initCastServer(
       return sendJson(res, 200, result || { ok: false, state: 'idle', reason: 'worker not ready' })
     },
   })
-  const disposeVideo = server.register({
+  const disposeVideo = register({
     kind: 'exact', path: EGO_VIDEO_ROUTE,
     handler: async (reqRaw: unknown, resRaw: unknown) => {
       const req = reqRaw as IncomingMessage

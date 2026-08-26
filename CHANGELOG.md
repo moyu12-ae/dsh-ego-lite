@@ -47,6 +47,9 @@
 - Windows 编码优先 `h264_mf` D3D11 硬件路径；编码器探针使用真实 HWND 管线，避免软件测试帧误判硬件编码不可用。显式 `fps/setpts` 固定 30 FPS，fMP4 分片降为 100ms，并用 `skip_trailer` 避免优雅停止时的 `mfra` parser 错误。
 - **登录态跨 DSH 重启保持（复刻原版 ego-lite 哲学）**：此前手动重启 / 强杀 DSH 后需重新登录——worker 收到 SIGTERM/SIGINT 时只 detach 不落盘，且插件卸载的 `--stop` 宽限 4s 不够、常落到 SIGTERM crash 兜底。现在 worker 退场前先对浏览器发 CDP `Browser.close`（优雅关闭，Cookie journal 合并进磁盘 profile），插件 teardown 宽限提到 8s 足够优雅关完。**实测**：优雅重启登录完全保留；强杀（SIGKILL）长期登录态也已落盘、重启能读回。
 
+### 安全
+- **观察窗路由同源校验**：`src/cast-server.ts` 全部 `/api/ego/*` exact 路由（spaces/stream/input/close/flush/health/watch×4/video×2）统一经新增的 `sameOriginOk()` 守卫，与 `/ego/api/*` 网关既有校验对齐——浏览器请求携带的 Origin 与服务 Host 不符时直接返回 `403 {error:'origin-not-allowed'}`，恶意页面不能再借本机回环端口跨站 POST `/api/ego/input|close|flush` 操纵 agent 浏览器；无 Origin 头的 curl/探针请求不受影响。实测：伪造 Origin 403、同源与无 Origin 均 200。
+
 ### 工程重构
 - **纯 JS → TypeScript 迁移**（PR #14）：源码从 `lib/` 移至 `src/`（`src/index.ts` 工具层、`src/client/index.ts` 前端、`src/worker/ego-cast-worker.ts` worker），`lib/` 与 `bin/ego-cast-worker.mjs` 改为构建产物（预构建入库）。构建链路改 `pnpm typecheck`（tsc 类型门禁，tsconfig.json + tsconfig.client.json）+ `pnpm test`（vitest）+ `pnpm run build`（tsdown 三 bundle）。测试同步迁移 `tests/*.test.mjs` → `.test.ts` 并补 `vitest.config.ts`。`lib/` 不再手改。
 

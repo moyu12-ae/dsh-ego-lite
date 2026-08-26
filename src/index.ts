@@ -45,6 +45,8 @@ import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED,
 import { installEgoBrowserSettings } from './settings.ts'
 import { registerEgoBrowserGateway } from './gateway.ts'
 import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
+import { resolveEngine, buildSpawnArgv, engineEnv, type ResolvedEngine } from './engine.ts'
+import { ReplSession, replSupported } from './repl-session.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec } from './types.ts'
 
@@ -74,11 +76,8 @@ type DefineToolOpts = any
 type ToolHandle = ReturnType<typeof defineTool>
 
 // ── constants ───────────────────────────────────────────────────────────────
-/** Vendored ego-linux CLI shipped inside this plugin (runtime/ego-linux/bin/). */
-const VENDORED_EGO_BIN = fileURLToPath(
-  new URL('../runtime/ego-linux/bin/ego-browser.mjs', import.meta.url),
-)
-const DEFAULT_EGO_BIN = VENDORED_EGO_BIN
+// Binary resolution moved to src/engine.ts (official-app-first detection with
+// the vendored runtime as fallback); see resolveEngine() there.
 const DEFAULT_SPACE = 'dsh-agent'
 const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 const DEFAULT_GRACE_MS = 15_000
@@ -373,6 +372,11 @@ const COLD_START_SIGNS = [
   /browser (was |is )?not (reachable|running|ready)/i,
   /target.*(closed|not found|detached|crashed)/i,
   /ECONNREFUSED/i,
+  // Persistent-REPL transport hiccups share cold-start retry semantics: the
+  // next attempt transparently rebuilds a fresh attached session.
+  /REPL session terminated/i,
+  /REPL cell timed out/i,
+  /REPL did not become ready/i,
 ]
 function isColdStartError(message: string): boolean {
   return COLD_START_SIGNS.some((re) => re.test(message))
@@ -446,25 +450,106 @@ interface EgoRuntimeConfig {
   readonly githubMirror: string
   readonly egoCliArgs: string
   readonly chromeArgs: string
+  // ── engine resolution (src/engine.ts) ────────────────────────────────
+  /** Which flavor actually runs facade scripts ('app' = official ego lite). */
+  readonly engineFlavor: ResolvedEngine['flavor']
+  readonly engineBin: string
+  readonly engineJsRuntime: boolean
+  readonly engineOrigin: string
+  readonly execSession: ResolvedConfig['execSession']
+  /** True when a persistent REPL channel is supportable on this host. */
+  readonly replCapable: boolean
+  /** Live persistent session (app flavor only); recreated lazily per call. */
+  replSession: ReplSession | null
+  /** Consecutive REPL anomalies this mount; >=2 permanently falls back. */
+  replFailures: number
+  /** Set once a non-transient REPL problem (e.g. an app too old) was seen. */
+  replDisabled: boolean
+  // Structural parity with ResolvedConfig (resolveEgoEnv takes the full type);
+  // this mirrors the configured engineMode SETTING, not the detected flavor.
+  readonly engineMode: ResolvedConfig['engineMode']
 }
 
 interface ExecLike {
   signal?: AbortSignal
 }
 
+function engineOf(cfg: Pick<EgoRuntimeConfig, 'engineFlavor' | 'engineBin' | 'engineJsRuntime' | 'engineOrigin'>): ResolvedEngine {
+  return {
+    flavor: cfg.engineFlavor,
+    binPath: cfg.engineBin,
+    jsRuntime: cfg.engineJsRuntime,
+    origin: cfg.engineOrigin,
+  }
+}
+
+function noteReplFailure(cfg: Pick<EgoRuntimeConfig, 'replFailures' | 'replDisabled'>): void {
+  cfg.replFailures += 1
+  if (cfg.replFailures >= 2) cfg.replDisabled = true
+}
+
+function disposeReplQuietly(cfg: Pick<EgoRuntimeConfig, 'replSession'>): void {
+  try {
+    cfg.replSession?.kill()
+  } catch {
+    /* noop */
+  }
+}
+
 async function runEgoScript(subprocess: SubprocessService, script: string, exec: ExecLike, cfg: EgoRuntimeConfig, graceOverrideMs?: number): Promise<WarmupResult> {
+  const extraCliArgs = filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
+
+  // ── persistent-session fast path (official ego lite app) ──────────────
+  // ONE attached REPL runtime serves every call: no per-call process boot, no
+  // re-attach to the app, and live task-space/tab state inside the helper
+  // itself. Any anomaly resets the session; repeated anomalies fall back to
+  // the legacy heredoc spawn below for the rest of this mount.
+  if (cfg.replCapable && !cfg.replDisabled) {
+    const wantRepl =
+      cfg.execSession === 'persistent' ||
+      (cfg.execSession === 'auto' && !cfg.replDisabled)
+    if (wantRepl) {
+      try {
+        if (cfg.replSession === null || !cfg.replSession.alive) {
+          cfg.replSession = new ReplSession(
+            cfg.engineBin,
+            Math.max(10_000, cfg.graceMs),
+            cfg.maxOutputBytes,
+          )
+          await cfg.replSession.launch()
+        }
+        const r = await cfg.replSession.exec(script, {
+          timeoutMs: TOOL_TIMEOUT_MS,
+          maxOutputBytes: cfg.maxOutputBytes,
+          signal: exec.signal,
+        })
+        if (r.ok) cfg.replFailures = 0
+        else noteReplFailure(cfg)
+        return {
+          ok: r.ok,
+          error: r.error,
+          value: r.value as Record<string, unknown> | undefined,
+          stdout: r.stdout,
+          stderr: '',
+        }
+      } catch (err) {
+        const message = String((err as Error)?.message ?? err)
+        disposeReplQuietly(cfg)
+        cfg.replSession = null
+        noteReplFailure(cfg)
+        if (!isColdStartError(message)) cfg.replDisabled = true
+        return { ok: false, error: message, stdout: '', stderr: '' }
+      }
+    }
+  }
+
+  // ── legacy heredoc path: one spawned process per call ────────────────────
   let handle
   try {
-    // User-configured extra ego-browser CLI args (settings field `egoCliArgs`).
-    // Filtered against EGO_CLI_BLOCKED so a saved value with a mutually-
-    // exclusive subcommand (--status/--stop/--help/...) cannot break every
-    // ego_* call by exiting before the heredoc runs.
-    const extraCliArgs = filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
     handle = subprocess.spawn({
-      // Run through the node interpreter so the vendored CLI needs no +x bit.
-      argv: [process.execPath, cfg.egoBin, 'nodejs', ...extraCliArgs],
+      argv: buildSpawnArgv(engineOf(cfg), extraCliArgs, process.execPath),
       cwd: process.cwd(),
-      env: resolveEgoEnv(cfg),
+      env: engineEnv(engineOf(cfg), resolveEgoEnv(cfg)),
       stdio: {
         stdin: { data: script },
         stdout: {
@@ -515,7 +600,7 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
     return {
       ok: false,
       error: missingModule
-        ? describeSpawnFailure(new Error(`node could not load ${cfg.egoBin}`))
+        ? describeSpawnFailure(new Error(`node could not load ${cfg.engineBin}`))
         : `ego-browser exited with ${
             outcome.exitCode !== null
               ? `code ${outcome.exitCode}`
@@ -630,6 +715,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     'chromePath', 'captureBackend', 'streamProfile', 'cdpFps', 'cdpQuality',
     'cdpMaxWidth', 'cdpBackstopIntervalMs', 'ffmpegFps', 'ffmpegMaxWidth', 'ffmpegBitrateKbps',
     'ffmpegEncoder', 'ffmpegPath', 'githubMirror', 'egoCliArgs', 'chromeArgs',
+    'engineMode', 'execSession',
     'castFpsCap', 'screencastQuality', 'screencastMaxWidth', 'backstopIntervalMs',
   ]
   const entry = Object.fromEntries(settingKeys.filter((key) => config[key] !== undefined).map((key) => [key, config[key]]))
@@ -641,11 +727,31 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   })
 
   const spaceTracker = createActiveSpaceTracker((config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE)
+  const initialResolved = resolveConfig(bridge.source() as RawConfig)
+  // Engine detection runs once per mount: app flavor (official ego lite) is
+  // preferred; config can force 'app'|'vendored'; a configured egoBin wins.
+  const engine = resolveEngine({
+    configuredEgoBin:
+      typeof config.egoBin === 'string' && config.egoBin !== '' ? config.egoBin : undefined,
+    engineMode: initialResolved.engineMode,
+  })
+  ctx.logger?.info?.(
+    `ego-browser: engine=${engine.flavor} (${engine.origin}) session=${initialResolved.execSession} replCapable=${replSupported(engine.flavor)}`,
+  )
   const cfg: EgoRuntimeConfig = {
-    egoBin:
-      typeof config.egoBin === 'string' && config.egoBin !== ''
-        ? config.egoBin
-        : DEFAULT_EGO_BIN,
+    egoBin: engine.binPath,
+    engineFlavor: engine.flavor,
+    engineBin: engine.binPath,
+    engineJsRuntime: engine.jsRuntime,
+    engineOrigin: engine.origin,
+    get execSession() {
+      return resolveConfig(bridge.source() as RawConfig).execSession
+    },
+    replCapable: replSupported(engine.flavor),
+    replSession: null,
+    replFailures: 0,
+    replDisabled: false,
+    engineMode: initialResolved.engineMode,
     configuredDefaultSpace: (config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE,
     spaceTracker,
     get defaultSpace() { return this.spaceTracker.current() },
@@ -720,9 +826,15 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   // never completes — the clean path still flushes cookies on a graceful DSH
   // close, and ego_auth_flush exists for explicit persistence.
   ctx.effect?.(() => {
+    // App flavor: the browser belongs to the USER'S RUNNING ego lite app —
+    // stopping it on plugin unload would close the user's own browsing and
+    // contradicts "use the local app" entirely. Only the vendored flavor owns
+    // its browser and keeps the historical --stop teardown behavior.
+    disposeReplQuietly(cfg)
+    if (cfg.engineFlavor !== 'vendored') return
     try {
       const handle = ctx.subprocess.spawn({
-        argv: [process.execPath, cfg.egoBin, '--stop'],
+        argv: [...(cfg.engineJsRuntime ? [process.execPath] : []), cfg.engineBin, '--stop'],
         cwd: process.cwd(),
         env: resolveEgoEnv(cfg),
         stdio: {
@@ -746,7 +858,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     }
   })
   ctx.logger?.info?.(
-    `ego-browser: mounted (egoBin=${cfg.egoBin}, defaultSpace=${cfg.defaultSpace})`,
+    `ego-browser: mounted (flavor=${cfg.engineFlavor} via ${cfg.engineOrigin}, bin=${cfg.engineBin}, defaultSpace=${cfg.defaultSpace})`,
   )
 }
 /** `ego_status` probes CLI availability by running the real `--status` path. */
@@ -779,9 +891,9 @@ function registerEgoStatus(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: T
         withEgoLock(async () => {
           try {
             const handle = ctx.subprocess.spawn({
-              argv: [process.execPath, cfg.egoBin, '--status'],
+              argv: [...(cfg.engineJsRuntime ? [process.execPath] : []), cfg.engineBin, '--status'],
               cwd: process.cwd(),
-              env: resolveEgoEnv(cfg),
+              env: engineEnv(engineOf(cfg), resolveEgoEnv(cfg)),
               stdio: {
                 stdin: { data: '' },
                 stdout: { maxBytes: 4096 },
@@ -794,7 +906,7 @@ function registerEgoStatus(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: T
             return {
               ok: true,
               available: outcome.exitCode === 0 && out !== '',
-              path: cfg.egoBin,
+              path: cfg.engineBin,
               exitCode: outcome.exitCode,
             }
           } catch (err) {

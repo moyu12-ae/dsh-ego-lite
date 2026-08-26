@@ -134,6 +134,10 @@ export interface ResolvedConfig {
   githubMirror: string
   egoCliArgs: string
   chromeArgs: string
+  /** Which CLI flavor executes facade scripts ('app' = official ego lite). */
+  engineMode: 'auto' | 'app' | 'vendored'
+  /** Execution channel over that flavor. */
+  execSession: 'auto' | 'persistent' | 'per-call'
 }
 
 /** Raw composition-layer config (may contain legacy / extra keys). */

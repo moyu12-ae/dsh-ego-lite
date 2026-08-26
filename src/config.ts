@@ -28,6 +28,8 @@ export const Config = z.object({
   // control flags are stripped (see EGO_CLI_BLOCKED / CHROME_BLOCKED below).
   egoCliArgs: z.string().description('Extra args appended to `ego-browser nodejs` argv. Takes effect on the next ego_* call.'),
   chromeArgs: z.string().description('Extra args appended to the Chrome launch argv. Takes effect on the next browser cold start (the browser is a singleton).'),
+  engineMode: z.union(['auto', 'app', 'vendored']).description('CLI flavor: auto prefers the official ego lite app and falls back to the vendored runtime.'),
+  execSession: z.union(['auto', 'persistent', 'per-call']).description('Execution channel: auto keeps one attached REPL session per app install (fast) and falls back to process-per-call spawns on anomalies.'),
   // Deprecated read-compatible keys. The settings UI only writes canonical keys.
   castFpsCap: z.number().min(0).max(60).step(1),
   screencastQuality: z.number().min(1).max(100).step(1),
@@ -193,5 +195,7 @@ export function resolveConfig(config: RawConfig = {}): ResolvedConfig {
     // so a saved value is not silently mutated by a later blocklist change.
     egoCliArgs: typeof config.egoCliArgs === 'string' ? config.egoCliArgs : '',
     chromeArgs: typeof config.chromeArgs === 'string' ? config.chromeArgs : '',
+    engineMode: oneOf(config.engineMode, ['auto', 'app', 'vendored'] as const, 'auto'),
+    execSession: oneOf(config.execSession, ['auto', 'persistent', 'per-call'] as const, 'auto'),
   }
 }

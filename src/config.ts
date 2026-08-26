@@ -29,7 +29,7 @@ export const Config = z.object({
   egoCliArgs: z.string().description('Extra args appended to `ego-browser nodejs` argv. Takes effect on the next ego_* call.'),
   chromeArgs: z.string().description('Extra args appended to the Chrome launch argv. Takes effect on the next browser cold start (the browser is a singleton).'),
   engineMode: z.union(['auto', 'app', 'vendored']).description('CLI flavor: auto prefers the official ego lite app and falls back to the vendored runtime.'),
-  execSession: z.union(['auto', 'persistent', 'per-call']).description('Execution channel: auto keeps one attached REPL session per app install (fast) and falls back to process-per-call spawns on anomalies.'),
+  execSession: z.union(['auto', 'persistent', 'per-call']).description('Execution channel for the official ego lite binary: auto/per-call spawn one `nodejs -e` eval per call (~0.4s full roundtrip, default); persistent OPTS INTO an experimental attached REPL session (requires a real TTY provider and is disabled by default).').default('auto'),
   // Deprecated read-compatible keys. The settings UI only writes canonical keys.
   castFpsCap: z.number().min(0).max(60).step(1),
   screencastQuality: z.number().min(1).max(100).step(1),

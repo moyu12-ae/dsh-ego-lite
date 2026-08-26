@@ -47,6 +47,7 @@ import { registerEgoBrowserGateway } from './gateway.ts'
 import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
 import { resolveEngine, buildSpawnArgv, engineEnv, type ResolvedEngine } from './engine.ts'
 import { ReplSession, replSupported } from './repl-session.ts'
+import { APP_FACADE_PRELUDE, withAppFacades } from './app-facades.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec } from './types.ts'
 
@@ -499,16 +500,17 @@ function disposeReplQuietly(cfg: Pick<EgoRuntimeConfig, 'replSession'>): void {
 async function runEgoScript(subprocess: SubprocessService, script: string, exec: ExecLike, cfg: EgoRuntimeConfig, graceOverrideMs?: number): Promise<WarmupResult> {
   const extraCliArgs = filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
 
-  // ── persistent-session fast path (official ego lite app) ──────────────
-  // ONE attached REPL runtime serves every call: no per-call process boot, no
-  // re-attach to the app, and live task-space/tab state inside the helper
-  // itself. Any anomaly resets the session; repeated anomalies fall back to
-  // the legacy heredoc spawn below for the rest of this mount.
-  if (cfg.replCapable && !cfg.replDisabled) {
-    const wantRepl =
-      cfg.execSession === 'persistent' ||
-      (cfg.execSession === 'auto' && !cfg.replDisabled)
-    if (wantRepl) {
+  // ── persistent-session fast path (official ego lite app, OPT-IN ONLY) ──
+  // One attached REPL runtime serving every call. Measured reality check:
+  // the official binary's `-e` eval channel already roundtrips a full
+  // facades+navigation script in ~0.45s per call with ZERO process-state
+  // risk, so persistence is no longer worth its fragility by default.
+  // Blocker for auto-enabling: driving `script(1)` from a Node spawn fails —
+  // our stdin is a socketpair and script bails with
+  // "tcgetattr/ioctl: Operation not supported on socket" (it needs a real
+  // TTY). Until the plugin carries a real pty dependency this stays an
+  // explicit execSession='persistent' experiment.
+  if (cfg.replCapable && !cfg.replDisabled && cfg.execSession === 'persistent') {
       try {
         if (cfg.replSession === null || !cfg.replSession.alive) {
           cfg.replSession = new ReplSession(
@@ -517,6 +519,19 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
             cfg.maxOutputBytes,
           )
           await cfg.replSession.launch()
+          // App flavor: install the namespaced-facade compat layer ONCE per
+          // REPL process so every later cell can speak page.*/taskSpaces.*.
+          // The prelude is idempotent; the sentinel cell proves it compiled.
+          if (engineOf(cfg).flavor === 'app') {
+            const boot = await cfg.replSession.exec(
+              withAppFacades(
+                'app',
+                `console.log('${SENTINEL}' + JSON.stringify({ ok: true, compat: 'app-facades-installed' }))\n`,
+              ),
+              { timeoutMs: Math.min(TOOL_TIMEOUT_MS, 20_000) },
+            )
+            if (!boot.ok) throw new Error(boot.error ?? 'app facade compat failed to install')
+          }
         }
         const r = await cfg.replSession.exec(script, {
           timeoutMs: TOOL_TIMEOUT_MS,
@@ -540,18 +555,24 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
         if (!isColdStartError(message)) cfg.replDisabled = true
         return { ok: false, error: message, stdout: '', stderr: '' }
       }
-    }
   }
 
-  // ── legacy heredoc path: one spawned process per call ────────────────────
+  // ── per-call spawn path ───────────────────────────────────────────────────
+  // Official native binary: ship the script as `nodejs -e <script>` argv —
+  // measured ~0.45s full facades+navigation roundtrip, no stdin dependency at
+  // all. Vendored shim keeps the stdin heredoc protocol.
   let handle
+  const engine = engineOf(cfg)
+  const useEvalArgv = !engine.jsRuntime
   try {
     handle = subprocess.spawn({
-      argv: buildSpawnArgv(engineOf(cfg), extraCliArgs, process.execPath),
+      argv: useEvalArgv
+        ? [engine.binPath, 'nodejs', '-e', withAppFacades('app', script)]
+        : buildSpawnArgv(engine, extraCliArgs, process.execPath),
       cwd: process.cwd(),
-      env: engineEnv(engineOf(cfg), resolveEgoEnv(cfg)),
+      env: engineEnv(engine, resolveEgoEnv(cfg)),
       stdio: {
-        stdin: { data: script },
+        stdin: { data: useEvalArgv ? '' : withAppFacades(engine.flavor, script) },
         stdout: {
           maxBytes: cfg.maxOutputBytes,
           spill: { maxBytes: cfg.maxOutputBytes },
@@ -610,11 +631,14 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
       stderr,
     }
   }
-  const value = parseSentinel(stdout)
+  // Official ego lite routes ALL embedded-node console output (console.log
+  // included) to fd2; the vendored shim keeps it on stdout. Parse the sentinel
+  // from either stream so the protocol is flavor-agnostic.
+  const value = parseSentinel(stdout) ?? parseSentinel(stderr)
   if (value === undefined) {
     return {
       ok: false,
-      error: `ego-browser finished but no ${SENTINEL} JSON payload was found on stdout${describeStderr(
+      error: `ego-browser finished but no ${SENTINEL} JSON payload was found on stdout/stderr${describeStderr(
         stderr,
       )}`,
       stdout,
@@ -867,7 +891,7 @@ function registerEgoStatus(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: T
     defineTool({
       name: 'ego_status',
       description:
-        'Check whether the ego-browser CLI is usable (runs `ego-browser --status`). Use this first when other ego_* tools report "CLI not found".',
+        'Check whether the ego-browser CLI is usable (runs a real CLI roundtrip; auto-detects the official ego lite app vs the vendored runtime). Use this first when other ego_* tools report "CLI not found".',
       parameters: {},
       output: {
         schema: {
@@ -878,20 +902,51 @@ function registerEgoStatus(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: T
             available: { type: 'boolean', required: true },
             path: { type: 'string' },
             exitCode: { type: 'integer' },
+            error: { type: 'string' },
           },
         },
         render: renderText,
       },
       // Chrome cold-start can exceed the runtime's own 20s DevTools window on
-      // a first launch (root/CI boxes in particular). Give --status a generous
+      // a first launch (root/CI boxes in particular). Give the probe a generous
       // budget so it does not report "unavailable" merely because the backing
       // browser was still warming up.
       timeoutMs: 25_000,
       execute: async () =>
         withEgoLock(async () => {
+          // Official app binary: there IS no `--status` subcommand (it exits 2),
+          // so availability = a real one-shot heredoc roundtrip carrying the
+          // sentinel (~0.15s when healthy). This also primes the persistent
+          // REPL session for subsequent tool calls.
+          if (!cfg.engineJsRuntime) {
+            try {
+              const r = await runEgoScript(
+                ctx.subprocess,
+                `console.log('${SENTINEL}' + JSON.stringify({ ok: true, probe: 'ping' }))\n`,
+                { signal: undefined },
+                cfg,
+              )
+              const bootOk = r.ok && (r.value as { ok?: unknown } | undefined)?.ok === true
+              return {
+                ok: true,
+                available: bootOk,
+                path: cfg.engineBin,
+                exitCode: bootOk ? 0 : 1,
+                ...(bootOk ? {} : { error: r.error ?? 'ping cell returned no sentinel payload' }),
+              }
+            } catch (err) {
+              return {
+                ok: true,
+                available: false,
+                path: cfg.engineBin,
+                exitCode: 1,
+                error: describeSpawnFailure(err),
+              }
+            }
+          }
           try {
             const handle = ctx.subprocess.spawn({
-              argv: [...(cfg.engineJsRuntime ? [process.execPath] : []), cfg.engineBin, '--status'],
+              argv: [process.execPath, cfg.engineBin, '--status'],
               cwd: process.cwd(),
               env: engineEnv(engineOf(cfg), resolveEgoEnv(cfg)),
               stdio: {
@@ -2042,6 +2097,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
       execute: async () => {
         const lines: string[] = []
         // vendored runtime
+        lines.push(`engine: ${cfg.engineFlavor} via ${cfg.engineOrigin}`)
         lines.push(`egoBin: ${cfg.egoBin}`)
         try { lines.push(`egoBin exists: ${existsSync(cfg.egoBin)}`) } catch { lines.push('egoBin exists: n/a') }
         // Chrome candidates

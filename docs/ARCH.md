@@ -14,26 +14,25 @@
 
 ```
 ego-browser/
-  package.json          # 版本号、build=语法校验、exports
-  lib/index.js          # [后端] 插件入口 + 30+ ego_* 工具注册（权威）
-  lib/cast-server.js    # [后端] host 路由：把前端 /api/ego/* 转发到观察窗 worker
-  lib/ffmpeg-installation.js # [后端] FFmpeg 检测、下载、校验与托管缓存
-  lib/ffmpeg-manifest.js # 固定平台资源、版本、SHA-256 与 GitHub 镜像改写
+  package.json          # 版本号、build=tsdown 打包、exports
+  src/                  # [权威源] TypeScript（v0.9.0 起恢复并成为唯一编辑面）
+  src/index.ts          # [后端] 插件入口 + 30+ ego_* 工具注册
+  src/engine.ts         # [后端] 运行时解析：官方 App 优先 / vendored 兜底 + argv/env 适配
+  src/repl-session.ts   # [后端] 官方二进制持久 REPL 会话通道（.cell 协议 + 哨兵）
+  src/config.ts         # 设置 schema、resolveConfig 与 CLI 参数过滤
+  src/types.ts          # 结构化宿主类型（不依赖 cordis 编译期安装）
+  lib/index.js          # [构建产物] 由 `npm run build` 从 src/ 打包（勿手改）
+  lib/cast-server.js    # （同上，随构建再生成）
   lib/client.js         # [前端] 右下角观察窗（通过 DSH 注入加载，单文件）
-  bin/ego-cast-worker.mjs  # [后端] 观察窗 worker：attach 浏览器、SSE 实时画面、humanCheck
-  bin/cdp-client.mjs       # CDP 请求/错误/事件封装
-  bin/capture-manager.mjs  # watcher lease、单后端状态机、generation
-  bin/capture-cdp.mjs      # control session + 单 target JPEG capture
-  bin/capture-ffmpeg.mjs   # FFmpeg 进程与 fMP4 发布
-  bin/ffmpeg-probe.mjs     # 可执行性、平台输入与 H.264 编码器探测
-  bin/capture-platform.mjs # 平台来源/crop/argv
-  bin/mp4-fragments.mjs    # 有界 ISO BMFF box parser
+  bin/ego-cast-worker.mjs  # 观察窗 worker：attach 浏览器、SSE 实时画面、humanCheck
   runtime/              # vendored ego-lite 运行时（只读参照，本地改动见 runtime/PATCHES.md）
   docs/ARCH.md          # 本文件
 ```
 
-**关键约定**：`lib/` 是唯一权威源。**不要**再建 `src/`、不要用 tsc 编译覆盖 lib
-（v0.6.0 已删除 src 和 tsconfig，`npm run build` 只做语法校验）。
+**关键约定**：`src/` 是唯一权威源；`lib/`、`bin/` 是 tsdown 构建产物，
+改代码只改 `src/`，然后 `npm run build` 再提交产物（产物入库是因为部署
+直接从仓库克隆装载）。历史注：v0.6.0 曾删除 src 只留手写 lib，v0.9.0
+TS 迁移已恢复 src 为源。
 
 ---
 

@@ -567,7 +567,7 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
   try {
     handle = subprocess.spawn({
       argv: useEvalArgv
-        ? [engine.binPath, 'nodejs', '-e', withAppFacades('app', script)]
+        ? [engine.binPath, ...extraCliArgs, 'nodejs', '-e', withAppFacades('app', script)]
         : buildSpawnArgv(engine, extraCliArgs, process.execPath),
       cwd: process.cwd(),
       env: engineEnv(engine, resolveEgoEnv(cfg)),

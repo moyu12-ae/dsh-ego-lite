@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+官方 ego lite App 引擎：优先驱动本机安装的官方 CLI（不再自带浏览器），vendored runtime 降级为无 App 环境的兜底。
+
+### 新增 / 优化
+- **双引擎架构**：新增引擎探测（`src/engine.ts`）——`~/.local/bin/ego-browser` 或 `ego lite.app` Framework helper 存在时走 **app 引擎**，脚本以 `nodejs -e <script>` argv 通道执行（实测含真实导航全程 ~0.5s，15 连发压测 0 失败、0 进程残留）；否则回退 vendored `runtime/ego-linux`。配置 `engineMode: auto|app|vendored` 可强制。
+- **命名空间兼容层**（`src/app-facades.ts`）：官方 CLI 只绑扁平 helper（`useOrCreateTaskSpace/click/js/drainEvents…`），兼容预置层按需重建 vendored 式 `page./browser./taskSpaces.` 命名空间——Locator 全方法（selectOption 经 `js()` IIFE 模拟、元素状态读取经 `domOnce`）、毫秒制 `waitForSelector/URL/Response/Event` 轮询族（规避版本相关的 `wait()` 单位歧义）、download 事件适配 `{path/saveAs/suggestedFilename/url}`。guard 式安装，官方未来原生绑定命名空间时自动让位。
+- **协议适配**：官方二进制把内嵌 Node 的全部 console 输出重定向到 stderr，哨兵解析改为 stdout 优先、stderr 回退；用户自定义 `ego-browser CLI 附加参数` 在 `-e` 通道照常追加。
+- **ego_status 重做**：app 引擎没有 `--status` 子命令（exit 2），可用性改为真实一次 `-e` ping 往返判定；失败时透出错误详情。
+- 能力矩阵与测量数据见 `docs/APP-COMPAT.md`。
+
+### 平台限制
+- 实验性持久 REPL 会话（`execSession: 'persistent'`）依赖真实 TTY 提供者：Node spawn 直驱 `/usr/bin/script` 会因 stdin 为 socketpair 报 `tcgetattr/ioctl: Operation not supported on socket`，故默认关闭；默认 `-e` 每次调用 ~0.5s，无需持久化。
+- app 引擎的等待为轮询实现（250ms 步进）；`getByRole` 是 CSS 近似而非 ARIA 查询。
+
 观察窗落地双画面管线：修复 CDP 协议根因，并加入可选 FFmpeg H.264/fMP4 后端。
 
 ### 新增 / 优化

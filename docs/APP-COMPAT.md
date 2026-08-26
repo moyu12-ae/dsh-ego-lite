@@ -85,7 +85,15 @@ budget instead of returning ambiguous nulls.
 - Waits are poll-based (no push events); sub-250 ms reactivity does not exist.
 - `waitForResponse` sees only events drained after the call starts.
 - `getByRole` is a CSS approximation.
-- Everything else in the tool surface behaves identically on both flavors.
+- `captureScreenshot` is bound as `captureScreenshot(pathString)` in installed
+  builds — the SKILL.md-documented `{path, ...}` object form reaches
+  `fs.writeFile` as an Object and throws `ERR_INVALID_ARG_TYPE`. The compat
+  layer translates option objects to the string form; calls without a path
+  use the no-arg tmp-file form.
+- `page.locator(sel).screenshot({path})` does not exist on this flavor; the
+  compat layer implements it as scrollIntoView + viewport-relative
+  `Page.captureScreenshot` clip (via the flat `cdp()` helper) + base64
+  write-through, so element shots match the layout box at device pixel ratio.
 
 ## Availability probe
 

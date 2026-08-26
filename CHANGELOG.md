@@ -10,6 +10,7 @@
 - **双引擎架构**：新增引擎探测（`src/engine.ts`）——`~/.local/bin/ego-browser` 或 `ego lite.app` Framework helper 存在时走 **app 引擎**，脚本以 `nodejs -e <script>` argv 通道执行（实测含真实导航全程 ~0.5s，15 连发压测 0 失败、0 进程残留）；否则回退 vendored `runtime/ego-linux`。配置 `engineMode: auto|app|vendored` 可强制。
 - **命名空间兼容层**（`src/app-facades.ts`）：官方 CLI 只绑扁平 helper（`useOrCreateTaskSpace/click/js/drainEvents…`），兼容预置层按需重建 vendored 式 `page./browser./taskSpaces.` 命名空间——Locator 全方法（selectOption 经 `js()` IIFE 模拟、元素状态读取经 `domOnce`）、毫秒制 `waitForSelector/URL/Response/Event` 轮询族（规避版本相关的 `wait()` 单位歧义）、download 事件适配 `{path/saveAs/suggestedFilename/url}`。guard 式安装，官方未来原生绑定命名空间时自动让位。
 - **协议适配**：官方二进制把内嵌 Node 的全部 console 输出重定向到 stderr，哨兵解析改为 stdout 优先、stderr 回退；用户自定义 `ego-browser CLI 附加参数` 在 `-e` 通道照常追加。
+- **截图契约修正**（实机测试发现）：装机版 `captureScreenshot` 实际只接受字符串路径，SKILL.md 文档化的 `{path}` 对象形式会在内部 `fs.writeFile` 处抛 `ERR_INVALID_ARG_TYPE`；兼容层将选项对象翻译为字符串形态、无 path 时走无参 tmp 形态，并补齐缺失的 `locator.screenshot({path})` 元素截图（scrollIntoView + CDP `Page.captureScreenshot` 视口裁剪 + base64 落盘）。实测整页 1888×804 与元素 3400×180 @2x 出图均正确。
 - **ego_status 重做**：app 引擎没有 `--status` 子命令（exit 2），可用性改为真实一次 `-e` ping 往返判定；失败时透出错误详情。
 - 能力矩阵与测量数据见 `docs/APP-COMPAT.md`。
 

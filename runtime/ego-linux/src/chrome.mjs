@@ -7,6 +7,14 @@ import { BROWSER_STATE_FILE, PROFILE_DIR, STATE_DIR } from "./paths.mjs";
 
 const BINARY_CANDIDATES = [
   process.env.EGO_LINUX_CHROME,
+  // macOS stock Chromium .app bundles — this shim uses Linux binary names, so
+  // fall back to the common macOS app paths when no env/path candidate hits.
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+  "/Applications/Arc.app/Contents/MacOS/Arc",
   "google-chrome",
   "google-chrome-stable",
   "chromium",

@@ -33,13 +33,42 @@
  * "fewer citations" rather than "no result".
  */
 
-import { SENTINEL, j, str, num } from './util.ts'
+import { SENTINEL, j, str, num, bool } from './util.ts'
 
 /** Dedicated task space the search runs in when no explicit `space` is given. */
 export const SEARCH_SPACE = 'web-search'
 
 /** Max ms to wait for the AI answer to finish rendering per query. */
 export const AI_SEARCH_TIMEOUT_MS = 40_000
+
+/**
+ * Whether a search run should auto-complete its own task space.
+ *
+ * The search tools reuse the dedicated `SEARCH_SPACE` (or the caller's explicit
+ * `space`) via `useSpace`, but completing that space is otherwise a cleanup
+ * blind spot: the agent only closes spaces it opens itself via `ego_space_open`,
+ * so a tool-owned space would leak. Default `keep` is false → auto-complete the
+ * space after the run (summary+citations are already returned, so the page is
+ * not needed). A caller wanting to keep browsing from a citation passes
+ * `keep:true`, which is respected. We deliberately do NOT auto-close a
+ * caller-passed non-default space — that space is the agent's live goal space.
+ */
+export function resolveAutoClose(resolvedSpace: string, keep: boolean): boolean {
+  return !keep && resolvedSpace === SEARCH_SPACE
+}
+
+/**
+ * Emit the JS that completes the space after the run, but only when it is the
+ * tool's own default space and `keep` is false. Runs at the end of the script
+ * regardless of per-query outcome (summary+citations are already returned), so
+ * the tool-owned space never leaks. The only path that skips it is the early
+ * return on an empty `queries` array, which never creates a space.
+ */
+export function buildAutoCloseSnippet(resolvedSpace: string, keep: boolean): string {
+  return resolveAutoClose(resolvedSpace, keep)
+    ? `try { await taskSpaces.complete(${j(resolvedSpace)}, { keep: false }) } catch (__e) {}\n`
+    : ''
+}
 
 /** Google AI Mode trigger: `udm=50` on google.com/search. */
 export function buildAiSearchUrl(query: string, opts: { base?: string } = {}): string {
@@ -179,6 +208,7 @@ export function buildAiSearchScript(
     (q): q is string => typeof q === 'string' && q.trim() !== '',
   )
   const resolvedSpace = str(args.space, SEARCH_SPACE) as string
+  const keep = bool(args.keep, false)
   if (queries.length === 0) {
     return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'web_ai_search: queries must be a non-empty array of strings' }))\n`
   }
@@ -221,7 +251,8 @@ export function buildAiSearchScript(
   s += `  if (r.sources && r.sources.length) { md += '\\n\\n' + r.sources.map(function (s, i) { return '[' + (i + 1) + '] ' + (s.title && s.title !== s.url ? s.title + ': ' : '') + s.url }).join('\\n') }\n`
   s += `  return '## ' + r.query + '\\n\\n' + md\n`
   s += `}).join('\\n\\n=====\\n\\n')\n`
-  s += `console.log('${SENTINEL}' + JSON.stringify({ ok: true, results: __results, text: __text }))\n`
+  s += buildAutoCloseSnippet(resolvedSpace, keep)
+  s += `console.log('${SENTINEL}' + JSON.stringify({ ok: true, results: __results, text: __text, space: ${j(resolvedSpace)}, kept: ${keep} }))\n`
   return s
 }
 
@@ -259,6 +290,7 @@ export function buildPlainSearchScript(
     (q): q is string => typeof q === 'string' && q.trim() !== '',
   )
   const resolvedSpace = str(args.space, SEARCH_SPACE) as string
+  const keep = bool(args.keep, false)
   if (queries.length === 0) {
     return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'web_search_plain: queries must be a non-empty array of strings' }))\n`
   }
@@ -288,6 +320,7 @@ export function buildPlainSearchScript(
   s += `  if (!r.ok) return '[搜索失败] ' + (r.query || '') + ': ' + (r.error || 'no links found')\n`
   s += `  return '## ' + r.query + '\\n\\n' + r.items.map(function (it) { return '- ' + it.title + '\\n  ' + it.url }).join('\\n')\n`
   s += `}).join('\\n\\n=====\\n\\n')\n`
-  s += `console.log('${SENTINEL}' + JSON.stringify({ ok: true, results: __results, text: __text }))\n`
+  s += buildAutoCloseSnippet(resolvedSpace, keep)
+  s += `console.log('${SENTINEL}' + JSON.stringify({ ok: true, results: __results, text: __text, space: ${j(resolvedSpace)}, kept: ${keep} }))\n`
   return s
 }

@@ -6,6 +6,8 @@ import {
   deriveSearchMarkdown,
   buildAiSearchScript,
   buildPlainSearchScript,
+  resolveAutoClose,
+  buildAutoCloseSnippet,
   AI_POLL_FN,
   AI_CONSENT_FN,
   AI_EXTRACT_FN,
@@ -145,6 +147,59 @@ describe('buildPlainSearchScript', () => {
   it('fails cleanly on empty queries', () => {
     const script = buildPlainSearchScript({ queries: [] }, useSpace, ensureRealTab)
     expect(script).toContain('queries must be a non-empty array of strings')
+  })
+})
+
+describe('ai-search space auto-close (cleanup blind spot fix)', () => {
+  it('resolveAutoClose is true only for the default space AND keep=false', () => {
+    expect(resolveAutoClose(SEARCH_SPACE, false)).toBe(true)
+  })
+  it('resolveAutoClose is false when keep=true (caller keeps the space)', () => {
+    expect(resolveAutoClose(SEARCH_SPACE, true)).toBe(false)
+  })
+  it('resolveAutoClose is false for a caller-passed non-default space', () => {
+    expect(resolveAutoClose('my-goal-space', false)).toBe(false)
+  })
+  it('buildAutoCloseSnippet emits a taskSpaces.complete for the default space', () => {
+    const snip = buildAutoCloseSnippet(SEARCH_SPACE, false)
+    expect(snip).toContain('taskSpaces.complete("web-search", { keep: false })')
+  })
+  it('buildAutoCloseSnippet is empty when keep=true or a non-default space', () => {
+    expect(buildAutoCloseSnippet(SEARCH_SPACE, true)).toBe('')
+    expect(buildAutoCloseSnippet('my-goal-space', false)).toBe('')
+  })
+})
+
+describe('buildAiSearchScript space/kept fields + auto-close emission', () => {
+  it('emits space and kept:false and auto-completes by default', () => {
+    const script = buildAiSearchScript({ queries: ['q1'] }, useSpace, ensureRealTab)
+    expect(script).toContain('space: "web-search"')
+    expect(script).toContain('kept: false')
+    expect(script).toContain('taskSpaces.complete("web-search", { keep: false })')
+  })
+  it('does NOT auto-complete when keep=true', () => {
+    const script = buildAiSearchScript({ queries: ['q1'], keep: true }, useSpace, ensureRealTab)
+    expect(script).toContain('kept: true')
+    expect(script).not.toContain('taskSpaces.complete')
+  })
+  it('does NOT auto-complete a caller-passed non-default space', () => {
+    const script = buildAiSearchScript({ queries: ['q1'], space: 'my-goal' }, useSpace, ensureRealTab)
+    expect(script).toContain('space: "my-goal"')
+    expect(script).not.toContain('taskSpaces.complete')
+  })
+})
+
+describe('buildPlainSearchScript space/kept fields + auto-close emission', () => {
+  it('emits space and kept:false and auto-completes by default', () => {
+    const script = buildPlainSearchScript({ queries: ['q1'] }, useSpace, ensureRealTab)
+    expect(script).toContain('space: "web-search"')
+    expect(script).toContain('kept: false')
+    expect(script).toContain('taskSpaces.complete("web-search", { keep: false })')
+  })
+  it('does NOT auto-complete when keep=true', () => {
+    const script = buildPlainSearchScript({ queries: ['q1'], keep: true }, useSpace, ensureRealTab)
+    expect(script).toContain('kept: true')
+    expect(script).not.toContain('taskSpaces.complete')
   })
 })
 

@@ -50,6 +50,7 @@ import {
   SEARCH_SPACE,
   buildAiSearchScript,
   buildPlainSearchScript,
+  resolveAutoClose,
 } from './ai-search.ts'
 import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec } from './types.ts'
 
@@ -1980,13 +1981,21 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description:
             `Task-space name; defaults to the dedicated '${SEARCH_SPACE}' space (reused across calls; complete it with ego_space_close when the goal is done).`,
         },
+        keep: {
+          type: 'boolean',
+          description:
+            `Keep the search space open after the run (default false). When false and the space is the dedicated '${SEARCH_SPACE}' one, the tool auto-completes it so it never leaks (the summary+citations are already returned, so the page is not needed). Set true to keep browsing from a citation link. A caller-passed non-default space is never auto-closed.`,
+        },
       },
       buildScript: (args) => buildAiSearchScript(args, useSpace, ensureRealTab),
       afterExecute: (args) => {
         // Mark the resolved search space active so later browsing continuations
-        // land in it. Use useSpace semantics; only when a result came back ok.
+        // land in it — BUT only when the tool did NOT auto-complete it. If it
+        // auto-closed (default keep=false on the dedicated space), record the
+        // close so the tracker doesn't point at a now-dead space.
         const target = typeof args.space === 'string' && args.space !== '' ? args.space : SEARCH_SPACE
-        cfg.spaceTracker.selected(target)
+        if (resolveAutoClose(target, bool(args.keep, false))) cfg.spaceTracker.closed(target, true)
+        else cfg.spaceTracker.selected(target)
       },
     }),
   )
@@ -2008,8 +2017,18 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description:
             `Task-space name; defaults to the dedicated '${SEARCH_SPACE}' space (reused across calls; complete it with ego_space_close when the goal is done).`,
         },
+        keep: {
+          type: 'boolean',
+          description:
+            `Keep the search space open after the run (default false). When false and the space is the dedicated '${SEARCH_SPACE}' one, the tool auto-completes it so it never leaks. Set true to keep browsing from a result link. A caller-passed non-default space is never auto-closed.`,
+        },
       },
       buildScript: (args) => buildPlainSearchScript(args, useSpace, ensureRealTab),
+      afterExecute: (args) => {
+        const target = typeof args.space === 'string' && args.space !== '' ? args.space : SEARCH_SPACE
+        if (resolveAutoClose(target, bool(args.keep, false))) cfg.spaceTracker.closed(target, true)
+        else cfg.spaceTracker.selected(target)
+      },
     }),
   )
 }

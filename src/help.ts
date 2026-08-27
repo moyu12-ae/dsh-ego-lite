@@ -11,7 +11,7 @@ export const EGO_HELP_INDEX: Record<string, string> = {
   tools:
     '工具清单: ego_status, ego_space_open, ego_space_close, ego_snapshot, ego_navigate, ego_click(+double), ego_fill, ego_js, ego_cdp, ego_screenshot(+selector), ego_page_info, ego_wait, ego_wait_for_selector, ego_wait_for_url, ego_wait_for_response, ego_key(+text/type), ego_hover, ego_read_element, ego_select, ego_drag, ego_scroll, ego_upload, ego_check, ego_dialog, ego_download, ego_http, ego_captcha, ego_auth_flush, ego_help, ego_doctor, ego_cli, ego_script + 搜索: web_ai_search(Google AI Mode摘要+引用), web_search_plain(纯结果链接)。',
   'ai-search':
-    'web_ai_search: 触发 Google AI Mode(udm=50),返回AI合成摘要+引用链接(一起)。多语言/多区域用 queries 数组一次搜多条(如["无职转生 动画","無職転生 アニメ"])。异步渲染+consent/区域墙已处理,自动等待+重试。优先用此工具而非廉价HTTP web_search——免费AI搜索+已汇总内容。web_search_plain: 纯Google结果链接,不要摘要时用。复用同一 task space,完成后 ego_space_close 收尾。',
+    'web_ai_search: 触发 Google AI Mode(udm=50),返回AI合成摘要+引用链接(一起)。多语言/多区域用 queries 数组一次搜多条(如["无职转生 动画","無職転生 アニメ"])。异步渲染+consent/区域墙已处理,自动等待+重试。优先用此工具而非廉价HTTP web_search——免费AI搜索+已汇总内容。web_search_plain: 纯Google结果链接,不要摘要时用。空间纪律: 默认走专用 web-search 空间,跑完自动 taskSpaces.complete 收尾(keep 默认 false),不留盲区;若传了非默认 space 则不会自动关。要继续点开引用链接就传 keep:true。',
   // Task-space lifecycle discipline (mirrors the official ego-browser skill):
   // complete/close when done; keep is opt-in with concrete reasons only.
   space:

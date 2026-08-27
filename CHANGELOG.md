@@ -6,6 +6,9 @@
 
 官方 ego lite App 引擎：优先驱动本机安装的官方 CLI（不再自带浏览器），vendored runtime 降级为无 App 环境的兜底。
 
+### 身份与定位
+- 项目更名 **dsh-ego-lite**（包标识 `@dsh-external/ego-browser` 保留——安装链路与设置命名空间稳定优先）。本项目是一次面向个人使用的二改（**不向上游提交 PR**），同时基于两个上游：[Fisfzy/dsh-ego-browser](https://github.com/Fisfzy/dsh-ego-browser) v0.8.0（插件骨架/工具层基础）与官方 ego lite 内置 **ego-skills/ego-browser** skill（SKILL.md v1.2.3，生命周期纪律与工作流方法论来源）。README 重写：双上游署名、不提 PR 声明、「相对官方 skill 的全能力覆盖矩阵 + 四层稳定性论证」。
+
 ### 移除（Breaking）
 - **实时观察窗/推流栈整体删除**：本分支定位转向"驱动用户本机官方 ego lite App"，"看得见"由官方 App 窗口本身承担。移除 `src/client/`（观察窗前端）、`src/worker/`（采集 worker）、`src/cast-server.ts`（`/api/ego/*` 路由）、`src/gateway.ts`（`/ego/api/*` 设置网关）、`src/ffmpeg-*.ts`（FFmpeg 安装/探测）及对应 10 个测试文件；设置键 `captureBackend/streamProfile/cdp*/ffmpeg*/githubMirror` 与遗留迁移键一并移除（持久化旧值被安全忽略）。包不再声明 `dsh.client` 入口与 react/dsh-client-* peer，构建收敛为单产物 `lib/index.js`。
 - **任务空间生命周期纪律对齐官方 skill**：`ego_space_open/close` 描述、open 结果 `note` 字段与 `ego_help` 新增 `space` 主题均写明——目标完成必须 close，`keep` 默认 `false`，仅"用户明确要求保留 / 需人工在该页操作 / 结果无法以文件或摘要交付"三种情况可 `keep=true`。

@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/ego-browser",
   "version": "0.9.0",
-  "description": "ego-browser (ego-lite) integration plugin for DSH: structured browser-automation tools (30+ ego_*) driving the LOCAL official ego lite app (or the vendored fallback runtime) through ctx.subprocess.",
+  "description": "dsh-ego-lite - DSH plugin driving the LOCAL official ego lite app with 32 structured ego_* tools. A no-PR personal rework based on Fisfzy/dsh-ego-browser v0.8.0 and the official CitroLabs/ego-lite ego-skills/ego-browser skill.",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",

@@ -1,24 +1,46 @@
-# ego-browser — 让 Agent 驱动你本机的官方 ego lite
+# dsh-ego-lite — 让 Agent 驱动你本机的官方 ego lite
 
-> 本仓库是 [`Fisfzy/dsh-ego-browser`](https://github.com/Fisfzy/dsh-ego-browser) 的社区二改分支（当前维护：[moyu12-ae/dsh-ego-browser](https://github.com/moyu12-ae/dsh-ego-browser)）。版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+> **dsh-ego-lite 是一次面向个人使用的二改**（fork-and-rework，**不向上游提交 PR**），同时基于以下两个上游项目改造而成：
+>
+> 1. **[Fisfzy/dsh-ego-browser](https://github.com/Fisfzy/dsh-ego-browser)** v0.8.0 —— DSH 插件骨架、32 个 `ego_*` 工具层与执行引擎的基础（MIT）。
+> 2. **[CitroLabs/ego-lite](https://github.com/CitroLabs/ego-lite)** 官方内置的 **ego-skills/ego-browser** skill（SKILL.md v1.2.3）—— 任务空间生命周期纪律与三工作流方法论的权威来源（MIT）。本插件把这套「提示词层」的能力固化成了结构化代码。
+>
+> 包标识 `@dsh-external/ego-browser` 保留不变，以稳定既有安装链路与设置命名空间。
 
-把 [CitroLabs/ego-lite](https://github.com/CitroLabs/ego-lite) 接入 DeepSeek Harness：以 **32 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰。
+把 ego lite 接入 DeepSeek Harness：以 **32 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰。
 
-## v0.9.0 方向变化（先读这个）
+## v0.9.0 方向变化
 
 本分支与上游的核心分歧：
 
-| | 上游 v0.8.x | 本分支 v0.9.0+ |
+| | 上游 v0.8.x | 本项目 v0.9.0+ |
 |---|---|---|
-| 浏览器来源 | 自带 vendored 运行时（随包 Chromium 管理启动） | **优先驱动本机已安装的官方 ego lite App**，vendored 仅作兜底 |
-| 实时观察窗 | 自带 SSE/FFmpeg 推流前端 + 监控窗接管 | **移除**——"看得见"由官方 ego lite App 窗口本身承担（它本来就是给人看的） |
-| 安装体积 | 含完整 runtime | 运行时仍保留作 Linux/Docker 兜底，但首选路径零额外进程 |
+| 浏览器来源 | 自带 vendored 运行时（随包管理 Chromium 启动） | **优先驱动本机已安装的官方 ego lite App**，vendored 仅作无 App 环境兜底 |
+| 实时观察窗 | 自带 SSE/FFmpeg 推流前端 + 监控窗接管 | **移除**——"看得见"由官方 ego lite App 窗口本身承担 |
+| 生命周期纪律 | 未强制 | **对齐官方 skill**：一个目标一个任务空间、用完必关（`keep` 默认 `false`），不留残留页面 |
 
-配套地，任务空间生命周期纪律对齐官方 skill：**一个目标一个空间、用完必关（`keep` 默认 `false`）**，不再留下"做完任务的残留页面"。
+## 相对官方 ego-browser skill：全能力覆盖 + 稳定性增强
+
+官方 App 内置的 ego-browser skill 以**提示词**形式教 agent 现场拼 heredoc 脚本——每个能力模型每轮都要临场写对。dsh-ego-lite 把同一套能力**固化为结构化工具**：能力全部覆盖（下表），且调用的正确性由代码保证：
+
+| 官方 skill 能力（SKILL.md v1.2.3） | dsh-ego-lite 对应 |
+|---|---|
+| 任务空间全周期：`useOrCreateTaskSpace` / `completeTaskSpace({keep})` / 同目标复用与收尾纪律 | `ego_space_open` / `ego_space_close`（keep 政策直接内置：默认 false + 三种正当例外写入工具描述与 open 返回的 note 字段） |
+| 语义工作流：`snapshotText()` → `@N` refs / `loc=` 选择器 | `ego_snapshot` + `ego_click/fill/hover/drag` 直吃 ref，无需模型理解快照协议 |
+| 视觉工作流：`captureScreenshot()` + 坐标/键盘操作 | `ego_screenshot`（整页 + **元素级裁剪**，后者是 skill 都没有的）+ 坐标点击 |
+| 直接 DOM / CDP 工作流：`js()` / `cdp()` | `ego_js` / `ego_cdp` / `ego_script`（多步脚本逃生舱） |
+| 辅助函数面：click/doubleClick/hover/dragMouse、selectOption、uploadFile、wait 族、pressKey/typeText、serverFetch/browserFetch、drainEvents… | 全部有对应结构化工具；装机版绑定缺失的面（`selectOption` 不在全局面、元素截图不存在、`{path}` 截图契约漂移、`completeTaskSpace` 强制 `{keep}`）由 `APP_FACADE_PRELUDE` 兼容层补齐/修复 |
+
+**稳定性优于裸 skill 的四层保障：**
+
+1. **串行互斥锁**：所有工具经进程内锁执行，杜绝并发调用争用同一浏览器。
+2. **瞬态专属重试**：仅对已知冷启动瞬态签名（CDP channel not open、DevTools timeout 等）重试，真错误不吞不掩。
+3. **契约漂移免疫**：skill 文档与现实 flavor 的每一处偏差都要 agent 当场踩坑；本插件已把实测发现的偏差全部修进兼容层（截图对象契约会崩→翻译为字符串形态、stdout/stderr 双路哨兵解析、`wait()` 秒制歧义→毫秒制自实现）。
+4. **参数安全**：用户自定义 CLI 参数经白名单过滤（`--status/--stop/--open` 等危险子命令永不进入 argv）。
 
 ## 它解决什么问题
 
-通用浏览器不是为 agent 设计的，而 Web 上大量交互（登录态、验证码、动态渲染、表单、需真人会话的站点）只有真浏览器能面对。ego lite 让 agent 用你已登录的浏览器而不打扰你；本插件把它接进 DSH：
+通用浏览器不是为 agent 设计的，而 Web 上大量交互（登录态、验证码、动态渲染、表单、需真人会话的站点）只有真浏览器能面对。ego lite 让 agent 用你已登录的浏览器而不打扰你；本项目把它接进 DSH：
 
 - 每个用户目标一个**任务空间**（隔离 browsing context，继承登录态），后续追问自动复用；
 - agent 全程结构化调用——导航、语义快照、点击填表、等待网络、截图取证——而不是猜选择器；
@@ -32,7 +54,7 @@
 | `app` | 强制官方 App |
 | `vendored` | 强制自带运行时（Linux 服务器 / Docker / 无 App 场景） |
 
-官方 App 与 vendored 的能力差异矩阵见 [docs/APP-COMPAT.md](docs/APP-COMPAT.md)：app flavor 缺失的 facade（如 locator 细分方法、元素截图）由 `src/app-facades.ts` 兼容预置层补齐。
+官方 App 与 vendored 的能力差异矩阵见 [docs/APP-COMPAT.md](docs/APP-COMPAT.md)：app flavor 缺失的 facade 由 `src/app-facades.ts` 兼容预置层补齐（守卫式安装，官方未来原生绑定时自动让位）。
 
 ## 前置条件
 
@@ -64,8 +86,10 @@ dshx list                                                # 应显示：[on] ego-
 
 ## 任务空间生命周期（重要纪律）
 
+继承官方 skill 并固化为工具约束：
+
 - 一个用户目标 = 一个任务空间；同一目标的追问/纠错/验收**必须复用**原空间。
-- 目标完成后必须 `ego_space_close` 收尾，**默认 `keep=false` 直接关闭页面**。
+- 目标完成后必须 `ego_space_close` 收尾，**默认 `keep=false` 直接关闭页面**——不留做完任务的残留页面。
 - 只有三种情况允许 `keep=true`：① 用户明确要求保留现场；② 需要用户在该页面上手动操作（登录/验证码）；③ 结果无法用文件/工件/摘要交付。「访问过页面」「截图验证过」不是理由。
 - 需要保留时，先关掉 scratch 标签页，只留值得给用户看的页。
 
@@ -75,13 +99,13 @@ dshx list                                                # 应显示：[on] ego-
 |---|---|
 | `engineMode` | `auto` / `app` / `vendored`，见上表 |
 | `execSession` | app 引擎执行通道：默认每次 `-e` 求值（~0.4s 往返）；`persistent` opt-in 实验性 REPL |
-| `egoCliArgs` | 追加到 `ego-browser nodejs` 的自定义参数（危险参数白名单过滤） |
+| `egoCliArgs` | 追加到 `ego-browser nodejs` 的自定义参数（白名单过滤） |
 | `chromePath` / `chromeArgs` | vendored 引擎的 Chrome 路径与附加启动参数 |
 
 ## 工作原理
 
-- **工具层**：每个工具把参数拼成 JS 脚本；app 引擎经 `[node, egoBin, 'nodejs', '-e', script]` 直执行（vendored 经 stdin heredoc），结果以哨兵行回传解析。所有 `ego_*` 经进程内互斥锁串行化；仅重试已知冷启动瞬态签名，不吞真错。
-- **兼容预置层**：app flavor 下脚本前置 `APP_FACADE_PRELUDE`，重建 `page/browser/taskSpaces/site` 命名空间与完整 locator 表面（守卫式安装——官方未来原生绑定时不冲突）。
+- **工具层**：每个工具把参数拼成 JS 脚本；app 引擎经 `[node, egoBin, 'nodejs', '-e', script]` 直执行（vendored 经 stdin heredoc），结果以哨兵行回传解析（stdout/stderr 双路兜底）。所有 `ego_*` 经进程内互斥锁串行化。
+- **兼容预置层**：app flavor 下脚本前置 `APP_FACADE_PRELUDE`，重建 `page/browser/taskSpaces/site` 命名空间与完整 locator 表面。
 - **卸载**：vendored 引擎 fire-and-forget `--stop` 清场；app 引擎不动用户的浏览器（那是用户自己的 App）。
 
 ## 开发
@@ -94,15 +118,8 @@ npm test            # vitest 单元测试
 npm run build       # tsdown 单产物 lib/index.js
 ```
 
-> 直接改 `src/`，构建后提交产物（部署从仓库克隆装载）。新工具在 `registerActionTools` 里按 `t({...})` 加，并在 `ego_help` 索引（`src/help.ts`）补一条。架构与防冲突规范见 [docs/ARCH.md](docs/ARCH.md)。
-
-## 已知限制（诚实说明）
-
-- **快照/等待语义**：app flavor 下部分等待是兼容层的轮询实现（250ms 步进），非原生事件等待；细节见 [docs/APP-COMPAT.md](docs/APP-COMPAT.md)。
-- **Windows**：官方 App 有 Windows 版；vendored 底层宿主仍是社区移植，复杂多步流程稳定性可能弱于 macOS。
-- **安装环境**：DSH peer 包不全在公共 npm registry，普通 `pnpm install` 可能在解析 peer 时失败；DSH profile 安装应提供这些 peer。
-- 输出 schema 为宽松 `additionalProperties: true`，客户端以实际返回值为准。
+> 直接改 `src/`，构建后提交产物。架构与防冲突规范见 [docs/ARCH.md](docs/ARCH.md)。
 
 ## 许可与署名
 
-插件本体 MIT。vendored 运行时嵌入 ego-lite 的 MIT 代码（本地改动见 [runtime/PATCHES.md](runtime/PATCHES.md)）。使用或再分发前请阅读 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+插件本体 MIT，承袭上游 Fisfzy/dsh-ego-browser。vendored 兜底运行时嵌入 ego-lite 的 MIT 代码（本地改动见 [runtime/PATCHES.md](runtime/PATCHES.md)）。设计方法论致谢官方 ego-skills/ego-browser skill。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

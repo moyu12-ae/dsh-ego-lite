@@ -6,6 +6,10 @@
 
 官方 ego lite App 引擎：优先驱动本机安装的官方 CLI（不再自带浏览器），vendored runtime 降级为无 App 环境的兜底。
 
+### 移除（Breaking）
+- **实时观察窗/推流栈整体删除**：本分支定位转向"驱动用户本机官方 ego lite App"，"看得见"由官方 App 窗口本身承担。移除 `src/client/`（观察窗前端）、`src/worker/`（采集 worker）、`src/cast-server.ts`（`/api/ego/*` 路由）、`src/gateway.ts`（`/ego/api/*` 设置网关）、`src/ffmpeg-*.ts`（FFmpeg 安装/探测）及对应 10 个测试文件；设置键 `captureBackend/streamProfile/cdp*/ffmpeg*/githubMirror` 与遗留迁移键一并移除（持久化旧值被安全忽略）。包不再声明 `dsh.client` 入口与 react/dsh-client-* peer，构建收敛为单产物 `lib/index.js`。
+- **任务空间生命周期纪律对齐官方 skill**：`ego_space_open/close` 描述、open 结果 `note` 字段与 `ego_help` 新增 `space` 主题均写明——目标完成必须 close，`keep` 默认 `false`，仅"用户明确要求保留 / 需人工在该页操作 / 结果无法以文件或摘要交付"三种情况可 `keep=true`。
+
 ### 新增 / 优化
 - **双引擎架构**：新增引擎探测（`src/engine.ts`）——`~/.local/bin/ego-browser` 或 `ego lite.app` Framework helper 存在时走 **app 引擎**，脚本以 `nodejs -e <script>` argv 通道执行（实测含真实导航全程 ~0.5s，15 连发压测 0 失败、0 进程残留）；否则回退 vendored `runtime/ego-linux`。配置 `engineMode: auto|app|vendored` 可强制。
 - **命名空间兼容层**（`src/app-facades.ts`）：官方 CLI 只绑扁平 helper（`useOrCreateTaskSpace/click/js/drainEvents…`），兼容预置层按需重建 vendored 式 `page./browser./taskSpaces.` 命名空间——Locator 全方法（selectOption 经 `js()` IIFE 模拟、元素状态读取经 `domOnce`）、毫秒制 `waitForSelector/URL/Response/Event` 轮询族（规避版本相关的 `wait()` 单位歧义）、download 事件适配 `{path/saveAs/suggestedFilename/url}`。guard 式安装，官方未来原生绑定命名空间时自动让位。

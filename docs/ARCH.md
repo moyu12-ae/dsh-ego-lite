@@ -1,12 +1,13 @@
 # ego-browser 架构与维护指南
 
-> 本文档是**代码健康**的核心：让任何维护者（含未来的科研整合包）在改代码前先看懂结构，
+> 本文档是**代码健康**的核心：让任何维护者在改代码前先看懂结构，
 > 知道"改哪里、怎么改、别踩什么坑"，从而避免深度冲突和"改不动"。
 
 ## 0. 一句话
 
-这是一个 DSH 插件：**自带 ego-lite 运行时**，把浏览器自动化能力封装成 `ego_*` 结构化工具，
-并提供**双后端实时观察窗 + 人机验证提醒 + 下载捕获**。
+这是一个 DSH 插件：**驱动本机官方 ego lite App（vendored 运行时兜底）**，
+把浏览器自动化能力封装成 30+ 个 `ego_*` 结构化工具。
+（v0.9.0 起移除了自带的实时观察窗/推流栈——"看得见"由官方 ego lite App 窗口本身承担。）
 
 ---
 
@@ -14,22 +15,25 @@
 
 ```
 ego-browser/
-  package.json          # 版本号、build=tsdown 打包、exports
-  src/                  # [权威源] TypeScript（v0.9.0 起恢复并成为唯一编辑面）
+  package.json          # 版本号、build=tsdown 单产物 lib/index.js
+  src/                  # [权威源] TypeScript，唯一编辑面
   src/index.ts          # [后端] 插件入口 + 30+ ego_* 工具注册
   src/engine.ts         # [后端] 运行时解析：官方 App 优先 / vendored 兜底 + argv/env 适配
+  src/app-facades.ts    # [后端] 官方 App flavor 的 page/browser/taskSpaces 兼容预置层
   src/repl-session.ts   # [后端] 官方二进制持久 REPL 会话通道（.cell 协议 + 哨兵）
   src/config.ts         # 设置 schema、resolveConfig 与 CLI 参数过滤
+  src/settings.ts       # settings namespace 注册（Symbol.for 共享 scope）
+  src/captcha.ts        # 人机验证探针脚本
+  src/help.ts           # ego_help 索引文案
   src/types.ts          # 结构化宿主类型（不依赖 cordis 编译期安装）
   lib/index.js          # [构建产物] 由 `npm run build` 从 src/ 打包（勿手改）
-  lib/cast-server.js    # （同上，随构建再生成）
-  lib/client.js         # [前端] 右下角观察窗（通过 DSH 注入加载，单文件）
-  bin/ego-cast-worker.mjs  # 观察窗 worker：attach 浏览器、SSE 实时画面、humanCheck
-  runtime/              # vendored ego-lite 运行时（只读参照，本地改动见 runtime/PATCHES.md）
+  bin/ego-chrome-wrapper.sh  # vendored runtime 的 --no-sandbox wrapper（非产物）
+  runtime/              # vendored ego-lite 运行时（兜底引擎；本地改动见 runtime/PATCHES.md）
   docs/ARCH.md          # 本文件
+  docs/APP-COMPAT.md    # 官方 App flavor 与 vendored 的差异矩阵
 ```
 
-**关键约定**：`src/` 是唯一权威源；`lib/`、`bin/` 是 tsdown 构建产物，
+**关键约定**：`src/` 是唯一权威源；`lib/index.js` 是 tsdown 构建产物，
 改代码只改 `src/`，然后 `npm run build` 再提交产物（产物入库是因为部署
 直接从仓库克隆装载）。历史注：v0.6.0 曾删除 src 只留手写 lib，v0.9.0
 TS 迁移已恢复 src 为源。
@@ -40,82 +44,45 @@ TS 迁移已恢复 src 为源。
 
 它内部已按职责清晰分区（虽然在一个文件里）：
 
-| 行号段 | 职责 | 说明 |
-|---|---|---|
-| 顶部常量 | SENTINEL、探针、默认值 | 运行时哨兵、配置默认 |
-| `withEgoLock` | 全插件工具互斥锁 | 所有 ego_* 串行，防争用同一浏览器 |
-| `findChromeBinary` / `resolveEgoEnv` | Chrome 探测 / 环境自适应 | 找 Chrome/Edge/Brave，headless 兜底 |
-| `runEgoScript` / `parseSentinel` / `withWarmupRetry` | 脚本执行引擎 | 每个工具 spawn `ego-browser nodejs` 跑一段 JS |
-| `defineEgoTool` / `t()` | 工具封装基座 | 统一加锁 + 冷启动重试 + 输出 |
-| `registerActionTools` | **大部分 ego_* 工具** | 用 `t({ name, description, parameters, buildScript })` 逐个注册 |
-| `registerHelpAndDoctor` | ego_help / ego_doctor / ego_script / ego_captcha | 辅助工具 |
-| `EGO_HELP_INDEX` / `HUMAN_CHECK_PROBE` | 工具索引文案 / 人机验证探针 | 数据为主 |
+| 职责 | 说明 |
+|---|---|
+| 顶部常量 | SENTINEL、探针、默认值 |
+| `withEgoLock` | 全插件工具互斥锁：所有 ego_* 串行，防争用同一浏览器 |
+| `runEgoScript` / `parseSentinel` / `withWarmupRetry` | 脚本执行引擎：每工具一次 spawn；app 引擎走 `nodejs -e`，vendored 走 stdin heredoc |
+| `defineEgoTool` / `t()` | 工具封装基座：统一加锁 + 冷启动重试 + 输出 schema |
+| `registerActionTools` | **大部分 ego_* 工具**（含空间生命周期纪律的描述文案） |
+| `registerEgoStatus` / `registerAuthFlush` / `registerHelpAndDoctor` | status / auth_flush / help·doctor·script·captcha |
 
 ### 怎么加一个工具（新功能入口）
 1. 在 `registerActionTools` 里 `reg(t({ name:'ego_xxx', description, parameters:{...}, buildScript:(args)=>\`…\` }))`
-2. `buildScript` 返回一段会在 `ego-browser nodejs` 里执行的 JS（可用 `page/browser/taskSpaces/site/fetch/cdp`）
-3. 结束后用 `console.log('@@DSH_RESULT@@'+JSON.stringify(payload))` 回传结构化结果
-4. 在 `EGO_HELP_INDEX` 补一条；改完跑 `npm run build` 校验
+2. `buildScript` 返回一段会在 ego-browser 里执行的 JS（app flavor 会先注入 `APP_FACADE_PRELUDE`）
+3. 结束后用哨兵行回传结构化结果（`console.log('@@DSH_RESULT@@'+JSON.stringify(payload))`）
+4. 在 `EGO_HELP_INDEX` 补一条；改完跑 `npm run typecheck && npm test && npm run build`
 
 ### 注意
 - 所有操作浏览器的工具**必须**走 `withEgoLock`（`t()` 会自动包）——不要绕过它
-- 对话框类工具**不要在对话框弹出时**执行 `page.evaluate`（会挂起），用 CDP `Page.handleJavaScriptDialog`
-- `fetch.server`（Node 侧）在 Windows runtime 会触发 libuv 崩溃——`ego_http` 默认走 `fetch.browser`
+- 官方二进制把内嵌 `console.log` 全送 stderr——哨兵解析要 stdout/stderr 双路兜底（已实现，勿删）
+- app 引擎下 facade 缺失是常态而非 bug：新依赖先查 `docs/APP-COMPAT.md` 与 `src/app-facades.ts`
+- 任务空间生命周期纪律写死在 `ego_space_open/close` 描述与 `help.index.space` 中
+  （keep 默认 false，仅三种正当理由可保留）——改文案时保持与官方 SKILL.md 一致
 
 ---
 
-## 3. lib/client.js — 观察窗前端（单文件，受 DSH 注入机制限制）
-
-受 `window.__ModuleLoader__.load({...})` 打包机制限制，**前端只能单文件**，不要拆物理文件。
-内部按 section 组织：CSS → icons → apply() → 各交互/渲染函数。
-
-维护时要同步注意：
-- 数据源：`/api/ego/stream` 提供元数据、CDP JPEG 与 capture status；`/api/ego/video` 提供 FFmpeg 二进制 fMP4
-- 生命周期：浮窗/side Tab 通过 `/api/ego/watch/*` 获取租约；组件逻辑隐藏或 dispose 时释放，`document.hidden` 不释放，以避免后台切换重建 WGC/FFmpeg
-- renderer：CDP 用 `<img>` + rAF 最新帧；FFmpeg 用 generation-aware `MediaSource` + `<video>`
-- 坐标交互：`makeDraggable`（球/窗口各自拖动）、`browserXY`（坐标逆映射）
-- 键盘交互：画面点击聚焦透明 textarea；beforeinput/composition 发送 `Input.insertText`，控制键/快捷键发送 keyDown/keyUp。禁止 document 全局键盘监听
-- 状态：`pageMeta`（vw/vh）、`frameCache`、`lastList`
-- FFmpeg 设置：`/ego/api/ffmpeg-*` 读取宿主安装状态；未通过检测时 `<option value="ffmpeg">` 必须禁用，不能只依赖后端启动失败兜底
-- 提醒条：`maybeShowLoginGuide` / `maybeShowCaptchaGuide`（读 `space.humanCheck`）
-
----
-
-## 4. bin/ego-cast-worker.mjs — 观察窗 worker
-
-独立 Node 进程，attach 到 agent 浏览器。控制面由 `TargetSessions` 持有，捕获停止时输入、viewport 与 humanCheck 不依赖 screencast session。`CaptureManager` 维护 lease、backend、target 与 generation；CDP/FFmpeg 后端只负责画面生产。JPEG 留在 SSE，fMP4 走独立二进制响应并处理背压。
-
-watch lease TTL 为 120 秒，抵抗浏览器后台定时器节流。host 对 start/switch 使用 30 秒 POST 超时并透传 worker 状态；其他控制请求保持短超时。FFmpeg 能力探针不得使用 `spawnSync`，否则会阻塞 health 并触发 sibling worker 误替换。
-
-CDP 帧必须使用 `params.sessionId` 作为 `Page.screencastFrameAck` 参数，同时使用事件外层 session 作为命令路由 session。不要再次把二者合并。
-
-Windows FFmpeg 后端必须走 `Browser.getWindowForTarget` + Win32 顶层窗口枚举匹配 HWND，再使用 `gfxcapture`。禁止恢复 `gdigrab desktop` fallback：它会在 Chrome 被遮挡时串流用户前台应用。`h264_mf` 的能力探针必须使用真实 D3D11 窗口输入，不能用 `lavfi` 软件帧代替。
-
-FFmpeg 二进制不属于 worker 生命周期。宿主 `FfmpegInstallationManager` 按自定义路径、PATH、托管缓存的顺序检测，并把最终 `ffmpegResolvedPath` 作为运行态配置传给 worker。托管下载必须固定 manifest 和 SHA-256，临时目录完成校验/解压/探测后才能原子发布；CDP 路径不得触发下载。
-
-**改动需重启 worker**（DSH 的 cast-server 检测到 worker 死后会重启，或手动重启）。
-worker 与 lib/index.js 的探针逻辑（humanCheck）是两份相似实现——改动一处要同步另一处，
-或后续抽公共文件（当前为规避跨运行时 import 风险保持两份）。
-
----
-
-## 5. runtime/ — vendored 运行时（只读参照）
+## 3. runtime/ — vendored 兜底运行时
 
 `runtime/` 来自 ego-lite（MIT），我们只做了少量本地改动：
 - `cursor.mjs`：默认水印 Claude → DeepSeek（品牌）
 - `task-spaces.mjs` / `transport.mjs` 等：针对性 bug 修复
-- `chrome.mjs`：代理支持
+- `chrome.mjs`：macOS Chrome 探测路径 + 代理支持
 
 **跟进上游 / 排查时**：每次改 runtime 请在 `runtime/PATCHES.md` 记录「改了什么 + 为什么」，
 避免与上游合并时冲突到无从回溯。
 
 ---
 
-## 6. 防冲突规范（最重要）
-1. **lib/ 是唯一权威**：别建 src/，别 tsc 覆盖。
-2. **改 lib/index.js 后记得同步已安装副本**（`~/.dsh/.external-plugins/ego-browser/lib/`）并
-   `node --check`。前端/worker 改动需重启 DSH。
-3. **加工具走 t() + withEgoLock**，补 help 索引。
-4. **跨运行时（前端/worker/工具）的重复逻辑**改动时要同步两份，并标注「改动时同步」。
-5. **发版本**：改 `package.json` 版本 → 更新 README 章节 → `git tag vX.Y.Z` branch 打 tag → push。
-6. `npm run build` 只做语法校验，不生成/覆盖任何东西。
+## 4. 防冲突规范（最重要）
+1. **src/ 是唯一权威源**：改代码只改 `src/`，`npm run build` 再提交 `lib/`。
+2. **加工具走 t() + withEgoLock**，补 help 索引。
+3. **双镜像警惕**：`tokenizeArgs/filterArgs/CHROME_BLOCKED` 在 `lib/config.js` 与
+   `runtime chrome.mjs` 各持一份——改动一处要评估另一处。
+4. **发版本**：改 `package.json` 版本 → 更新 CHANGELOG → `git tag vX.Y.Z` → push。

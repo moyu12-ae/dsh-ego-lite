@@ -1,11 +1,11 @@
 # dsh-ego-lite — 让 Agent 驱动你本机的官方 ego lite
 
-> **dsh-ego-lite 是一次面向个人使用的二改**（fork-and-rework，**不向上游提交 PR**），同时基于以下两个上游项目改造而成：
+> **dsh-ego-lite 是 DSH ⇄ 官方 ego lite 的结构化桥接层**：把 skill 层的提示词方法论固化成代码。同时是一次面向个人使用的二改（fork-and-rework，**不向上游提交 PR**），基于以下两个上游项目改造而成：
 >
 > 1. **[Fisfzy/dsh-ego-browser](https://github.com/Fisfzy/dsh-ego-browser)** v0.8.0 —— DSH 插件骨架、32 个 `ego_*` 工具层与执行引擎的基础（MIT）。
 > 2. **[CitroLabs/ego-lite](https://github.com/CitroLabs/ego-lite)** 官方内置的 **ego-skills/ego-browser** skill（SKILL.md v1.2.3）—— 任务空间生命周期纪律与三工作流方法论的权威来源（MIT）。本插件把这套「提示词层」的能力固化成了结构化代码。
 >
-> 包标识 `@dsh-external/ego-browser` 保留不变，以稳定既有安装链路与设置命名空间。
+> 包名 **dsh-ego-lite**（GitHub 仓库同名）；插件内部的 settings 命名空间保持 `ego-browser` 不变，既有配置无缝沿用。
 
 把 ego lite 接入 DeepSeek Harness：以 **32 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰。
 

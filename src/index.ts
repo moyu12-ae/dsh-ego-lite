@@ -38,13 +38,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { initCastServer, markEgoToolCall } from './cast-server.ts'
 import { EGO_HELP_INDEX } from './help.ts'
 import { HUMAN_CHECK_PROBE } from './captcha.ts'
 import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
 import { installEgoBrowserSettings } from './settings.ts'
-import { registerEgoBrowserGateway } from './gateway.ts'
-import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
 import { resolveEngine, buildSpawnArgv, engineEnv, type ResolvedEngine } from './engine.ts'
 import { ReplSession, replSupported } from './repl-session.ts'
 import { APP_FACADE_PRELUDE, withAppFacades } from './app-facades.ts'
@@ -52,17 +49,11 @@ import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec } from './types.ts'
 
 export const name = 'ego-browser'
-// Host services: this build targets the DSH Web shell, whose `webServer`
-// service backs both the settings gateway (/ego/api/*) and the cast-server
-// watch panel (/api/ego/*). NOTE: these are HARD dependencies, not optional —
-// cordis 0.1.0 only supports plain-string inject arrays (the object-optional
-// syntax broke cast-server registration in the 2026-08-13 regression), and
-// plain strings resolve through fiber.store with wait-until-available
-// semantics: on a runner without `webServer` this plugin would stay pending
-// rather than degrade gracefully. Every working host plugin (aionui-panel,
-// client-connection, web-app) makes the same trade. initCastServer still
-// null-guards the resolved service defensively at apply() time.
-export const inject = ['tools', 'subprocess', 'webServer']
+// Host services: `tools` registers the ego_* tools; `subprocess` spawns the
+// ego-browser CLI. NOTE: these are HARD dependencies, not optional — cordis
+// 0.1.0 only supports plain-string inject arrays, and plain strings resolve
+// through fiber.store with wait-until-available semantics.
+export const inject = ['tools', 'subprocess']
 // Schemastery schema for the composition entry and the `ego-browser` settings
 // namespace. Re-exported from config.ts so cordis's loader validates the
 // composition layer and ctx.settings.register() validates the user layer.
@@ -438,18 +429,6 @@ interface EgoRuntimeConfig {
   maxOutputBytes: number
   graceMs: number
   readonly chromePath: string
-  readonly captureBackend: ResolvedConfig['captureBackend']
-  readonly streamProfile: ResolvedConfig['streamProfile']
-  readonly cdpFps: number
-  readonly cdpQuality: number
-  readonly cdpMaxWidth: number
-  readonly cdpBackstopIntervalMs: number
-  readonly ffmpegFps: number
-  readonly ffmpegMaxWidth: number
-  readonly ffmpegBitrateKbps: number
-  readonly ffmpegEncoder: ResolvedConfig['ffmpegEncoder']
-  readonly ffmpegPath: string
-  readonly githubMirror: string
   readonly egoCliArgs: string
   readonly chromeArgs: string
   // ── engine resolution (src/engine.ts) ────────────────────────────────
@@ -704,12 +683,6 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
     timeoutMs: TOOL_TIMEOUT_MS,
     execute: async (args: Record<string, unknown>, exec: ToolExec) =>
       withEgoLock(async () => {
-        // Signal the client to auto-open the sidebar Tab on the first ego_*
-        // tool call. markEgoToolCall() bumps a host-side counter surfaced via
-        // /api/ego/spaces; the LivePreviewController transitions on 0 → >0 and
-        // calls betterSidebar.openTab(). Idempotent: the client's transition
-        // guard means only the first call per session opens the Tab.
-        markEgoToolCall()
         const script = opts.buildScript(args)
         // A first-call cold Chromium can make the spawn fail transiently
         // ("CDP channel is not open" etc.); retry only that case so a warmed
@@ -734,22 +707,14 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
 // ── plugin entry ────────────────────────────────────────────────────────────
 export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   // Install the settings bridge first: the live config source (composition
-  // entry + user-layer overrides) feeds `chromePath` + cast settings into cfg
+  // entry + user-layer overrides) feeds `chromePath` + engine settings into cfg
   // via getters so every spawn reads the latest value without re-registration.
   const settingKeys = [
-    'chromePath', 'captureBackend', 'streamProfile', 'cdpFps', 'cdpQuality',
-    'cdpMaxWidth', 'cdpBackstopIntervalMs', 'ffmpegFps', 'ffmpegMaxWidth', 'ffmpegBitrateKbps',
-    'ffmpegEncoder', 'ffmpegPath', 'githubMirror', 'egoCliArgs', 'chromeArgs',
+    'chromePath', 'egoCliArgs', 'chromeArgs',
     'engineMode', 'execSession',
-    'castFpsCap', 'screencastQuality', 'screencastMaxWidth', 'backstopIntervalMs',
   ]
   const entry = Object.fromEntries(settingKeys.filter((key) => config[key] !== undefined).map((key) => [key, config[key]]))
   const bridge = installEgoBrowserSettings(ctx, entry)
-  const ffmpegManager = getSharedFfmpegInstallationManager()
-  const initialFfmpegConfig = resolveConfig(bridge.source() as RawConfig)
-  void ffmpegManager.check({ configuredPath: initialFfmpegConfig.ffmpegPath, requestedEncoder: initialFfmpegConfig.ffmpegEncoder }).catch(() => {
-    /* ignore */
-  })
 
   const spaceTracker = createActiveSpaceTracker((config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE)
   const initialResolved = resolveConfig(bridge.source() as RawConfig)
@@ -787,18 +752,6 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     get chromePath() {
       return resolveConfig(bridge.source() as RawConfig).chromePath
     },
-    get captureBackend() { return resolveConfig(bridge.source() as RawConfig).captureBackend },
-    get streamProfile() { return resolveConfig(bridge.source() as RawConfig).streamProfile },
-    get cdpFps() { return resolveConfig(bridge.source() as RawConfig).cdpFps },
-    get cdpQuality() { return resolveConfig(bridge.source() as RawConfig).cdpQuality },
-    get cdpMaxWidth() { return resolveConfig(bridge.source() as RawConfig).cdpMaxWidth },
-    get cdpBackstopIntervalMs() { return resolveConfig(bridge.source() as RawConfig).cdpBackstopIntervalMs },
-    get ffmpegFps() { return resolveConfig(bridge.source() as RawConfig).ffmpegFps },
-    get ffmpegMaxWidth() { return resolveConfig(bridge.source() as RawConfig).ffmpegMaxWidth },
-    get ffmpegBitrateKbps() { return resolveConfig(bridge.source() as RawConfig).ffmpegBitrateKbps },
-    get ffmpegEncoder() { return resolveConfig(bridge.source() as RawConfig).ffmpegEncoder },
-    get ffmpegPath() { return resolveConfig(bridge.source() as RawConfig).ffmpegPath },
-    get githubMirror() { return resolveConfig(bridge.source() as RawConfig).githubMirror },
     // User-defined extra CLI args (see src/config.ts). Live getters so GUI
     // edits take effect on the next spawn / next browser cold start.
     get egoCliArgs() { return resolveConfig(bridge.source() as RawConfig).egoCliArgs },
@@ -813,34 +766,6 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   registerAuthFlush(ctx, cfg, reg)
   registerActionTools(ctx, cfg, reg)
   registerHelpAndDoctor(ctx, cfg, reg)
-  // Realtime watch-panel host routes (/api/ego/*). Guarded: only meaningful
-  // when the host exposes an HTTP server (web surface); headless safe-no-op.
-  // The host service is `webServer` on the web shell (current runner). We only
-  // reach for `webServer` here (declared in inject) so a strict-inject host
-  // never trips on an undeclared `httpServer` read. [restored 2026-08-13: the
-  // earlier disable dropped both the webServer inject and this registration,
-  // killing the bottom-right live browser view. Plain-string `webServer`
-  // inject resolves through fiber.store and is fully supported by cordis.]
-  if (typeof ctx.webServer?.register === 'function') {
-    try {
-      initCastServer(ctx, cfg, bridge, ffmpegManager)
-    } catch (err) {
-      ctx.logger?.warn?.(
-        `ego-browser: cast server init failed: ${(err as Error)?.message ?? err}`,
-      )
-    }
-    // Settings HTTP gateway (/ego/api/get + /ego/api/set) — lets the browser
-    // read/write the `chromePath` config through a self-hosted HTTP route,
-    // bypassing the host's settings-RPC allowlist. Same webServer the cast
-    // server uses; guarded so a headless host without webServer is a no-op.
-    try {
-      registerEgoBrowserGateway(ctx, bridge, ffmpegManager)
-    } catch (err) {
-      ctx.logger?.warn?.(
-        `ego-browser: settings gateway init failed: ${(err as Error)?.message ?? err}`,
-      )
-    }
-  }
   // Graceful teardown: stop the persistent browser when the plugin unmounts.
   // CRITICAL: this must be fire-and-forget, NOT awaited. Awaiting `--stop`
   // (which asks the browser to graceful-close, ~seconds) stalls the host process
@@ -1089,7 +1014,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
     t({
       name: 'ego_space_open',
       description:
-        'Open (or reuse) an ego-lite task space — an isolated browsing context that inherits your login state. It becomes the active space for later ego_* calls that omit `space`.',
+        'Open (or reuse) an ego-lite task space — an isolated browsing context that inherits your login state. It becomes the active space for later ego_* calls that omit `space`. Reuse the same space for follow-ups on the same goal; ALWAYS call ego_space_close when the goal is done — never leave a space hanging.',
       parameters: {
         name: {
           type: 'string',
@@ -1102,14 +1027,14 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         `${useSpace(str(args.name, cfg.defaultSpace))}` +
         `console.log('${SENTINEL}' + JSON.stringify({ ok: true, id: task.id ?? null, name: task.name ?? ${j(
           str(args.name, cfg.defaultSpace),
-        )} }))\n`,
+        )}, note: ${j('reuse this space for follow-ups; when the goal is done run ego_space_close (keep defaults to false)')} }))\n`,
     }),
   )
   reg(
     t({
       name: 'ego_space_close',
       description:
-        'Complete (close) an ego-lite task space. Must be the final ego_* call for a task — never leave a space hanging. `keep: true` keeps the page open for the user.',
+        'Complete (close) an ego-lite task space. Must be the final ego_* call for a task — never leave a space hanging. Policy: `keep` defaults to FALSE — close the space after completion unless the user explicitly asked to keep the page open, the task needs manual user action in that exact page, or the result cannot be delivered as a file/artifact/summary. Merely having visited a page or used it for verification is NOT a reason to keep.',
       parameters: {
         name: {
           type: 'string',
@@ -1118,7 +1043,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         keep: {
           type: 'boolean',
-          description: 'Keep the live page open (default false: close it).',
+          description:
+            'Keep the live page open (default false). Only set true for the concrete reasons above; when keeping, first close scratch tabs so only pages worth showing remain.',
         },
       },
       buildScript: (args) =>
@@ -1963,7 +1889,6 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         timeoutMs: TOOL_TIMEOUT_MS,
         execute: async (args: Record<string, unknown>, exec: ToolExec) => {
-          markEgoToolCall()
           const script = str(args.script, '')
           const result = await withWarmupRetry(() =>
             runEgoScript(ctx.subprocess, script, exec, cfg),
@@ -2015,7 +1940,6 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
       timeoutMs: 15_000,
       execute: async (args: Record<string, unknown>, exec: ToolExec) =>
         withEgoLock(async () => {
-          markEgoToolCall()
           const result = await withWarmupRetry(() =>
             runEgoScript(
               ctx.subprocess,
@@ -2189,7 +2113,6 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
         },
         timeoutMs: TOOL_TIMEOUT_MS,
         execute: async (args: Record<string, unknown>, exec: ToolExec) => {
-          markEgoToolCall()
           const script = str(args.script, '')
           // Honor the documented per-run timeout override (integer ms). Falls
           // back to the plugin's default grace when absent/invalid.

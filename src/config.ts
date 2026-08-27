@@ -1,40 +1,16 @@
 import z from 'schemastery'
 import type { RawConfig, ResolvedConfig } from './types.ts'
 
-const backend = z.union(['auto', 'cdp', 'ffmpeg'])
-const profile = z.union(['low', 'balanced', 'high'])
-const encoder = z.union([
-  'auto', 'software', 'h264_mf', 'h264_nvenc', 'h264_qsv', 'h264_amf',
-  'h264_videotoolbox', 'h264_vaapi',
-])
-
 // Defaults live in resolveConfig so a persisted legacy value is not hidden by
-// a schema default before the one-release migration runs.
+// a schema default before migration runs.
 export const Config = z.object({
-  chromePath: z.string().description('Path to Chrome/Chromium. Empty = auto-detect.'),
-  captureBackend: backend.description('Capture backend: auto, cdp, or ffmpeg.'),
-  streamProfile: profile.description('Capture quality profile.'),
-  cdpFps: z.number().min(5).max(30).step(1).description('CDP preview FPS.'),
-  cdpQuality: z.number().min(1).max(100).step(1).description('CDP JPEG quality.'),
-  cdpMaxWidth: z.number().min(320).max(1920).step(40).description('CDP frame max width.'),
-  cdpBackstopIntervalMs: z.number().min(1000).max(10000).step(100).description('CDP recovery screenshot interval.'),
-  ffmpegFps: z.number().min(5).max(30).step(1).description('FFmpeg video FPS.'),
-  ffmpegMaxWidth: z.number().min(320).max(1920).step(40).description('FFmpeg video max width.'),
-  ffmpegBitrateKbps: z.number().min(500).max(20000).step(250).description('FFmpeg target video bitrate in kbps.'),
-  ffmpegEncoder: encoder.description('FFmpeg H.264 encoder.'),
-  ffmpegPath: z.string().description('Custom FFmpeg path. Empty = detect PATH or managed install.'),
-  githubMirror: z.string().description('HTTPS base replacing https://github.com for managed downloads.'),
+  chromePath: z.string().description('Path to Chrome/Chromium. Empty = auto-detect. (vendored runtime only)'),
   // User-defined extra CLI args. Shell-like tokenize; mutually-exclusive
   // control flags are stripped (see EGO_CLI_BLOCKED / CHROME_BLOCKED below).
   egoCliArgs: z.string().description('Extra args appended to `ego-browser nodejs` argv. Takes effect on the next ego_* call.'),
-  chromeArgs: z.string().description('Extra args appended to the Chrome launch argv. Takes effect on the next browser cold start (the browser is a singleton).'),
+  chromeArgs: z.string().description('Extra args appended to the Chrome launch argv (vendored runtime only). Takes effect on the next browser cold start (the browser is a singleton).'),
   engineMode: z.union(['auto', 'app', 'vendored']).description('CLI flavor: auto prefers the official ego lite app and falls back to the vendored runtime.'),
   execSession: z.union(['auto', 'persistent', 'per-call']).description('Execution channel for the official ego lite binary: auto/per-call spawn one `nodejs -e` eval per call (~0.4s full roundtrip, default); persistent OPTS INTO an experimental attached REPL session (requires a real TTY provider and is disabled by default).').default('auto'),
-  // Deprecated read-compatible keys. The settings UI only writes canonical keys.
-  castFpsCap: z.number().min(0).max(60).step(1),
-  screencastQuality: z.number().min(1).max(100).step(1),
-  screencastMaxWidth: z.number().min(320).max(1920).step(40),
-  backstopIntervalMs: z.number().min(200).max(10000).step(100),
 })
 
 // ── user-defined extra CLI args ─────────────────────────────────────────────
@@ -160,37 +136,13 @@ export function filterArgs(raw: string, blocked: Set<string>): string[] {
   return kept
 }
 
-const finiteIn = (value: unknown, min: number, max: number): value is number =>
-  typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
-
 function oneOf<T extends string>(value: unknown, values: readonly T[], fallback: T): T {
   return typeof value === 'string' && (values as readonly string[]).includes(value) ? (value as T) : fallback
 }
 
 export function resolveConfig(config: RawConfig = {}): ResolvedConfig {
-  const legacyFps = finiteIn(config.castFpsCap, 0, 60)
-    ? (config.castFpsCap === 0 ? 20 : Math.max(5, Math.min(30, config.castFpsCap)))
-    : 20
-  const selectedProfile = oneOf(config.streamProfile, ['low', 'balanced', 'high'], 'balanced')
-  const profileDefaults = selectedProfile === 'low'
-    ? { fps: 15, width: 960, bitrateKbps: 2000 }
-    : selectedProfile === 'high'
-      ? { fps: 30, width: 1600, bitrateKbps: 8000 }
-      : { fps: 20, width: 1280, bitrateKbps: 4000 }
   return {
     chromePath: typeof config.chromePath === 'string' ? config.chromePath : '',
-    captureBackend: oneOf(config.captureBackend, ['auto', 'cdp', 'ffmpeg'], 'auto'),
-    streamProfile: selectedProfile,
-    cdpFps: finiteIn(config.cdpFps, 5, 30) ? config.cdpFps : legacyFps,
-    cdpQuality: finiteIn(config.cdpQuality, 1, 100) ? config.cdpQuality : (finiteIn(config.screencastQuality, 1, 100) ? config.screencastQuality : 55),
-    cdpMaxWidth: finiteIn(config.cdpMaxWidth, 320, 1920) ? config.cdpMaxWidth : (finiteIn(config.screencastMaxWidth, 320, 1920) ? config.screencastMaxWidth : 960),
-    cdpBackstopIntervalMs: finiteIn(config.cdpBackstopIntervalMs, 1000, 10000) ? config.cdpBackstopIntervalMs : (finiteIn(config.backstopIntervalMs, 200, 10000) ? Math.max(1000, config.backstopIntervalMs) : 3000),
-    ffmpegFps: finiteIn(config.ffmpegFps, 5, 30) ? config.ffmpegFps : profileDefaults.fps,
-    ffmpegMaxWidth: finiteIn(config.ffmpegMaxWidth, 320, 1920) ? config.ffmpegMaxWidth : profileDefaults.width,
-    ffmpegBitrateKbps: finiteIn(config.ffmpegBitrateKbps, 500, 20000) ? config.ffmpegBitrateKbps : profileDefaults.bitrateKbps,
-    ffmpegEncoder: oneOf(config.ffmpegEncoder, ['auto', 'software', 'h264_mf', 'h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_videotoolbox', 'h264_vaapi'], 'auto'),
-    ffmpegPath: typeof config.ffmpegPath === 'string' ? config.ffmpegPath : '',
-    githubMirror: typeof config.githubMirror === 'string' ? config.githubMirror : '',
     // User-defined extra args: stored raw (string), filtered at the call site
     // so a saved value is not silently mutated by a later blocklist change.
     egoCliArgs: typeof config.egoCliArgs === 'string' ? config.egoCliArgs : '',

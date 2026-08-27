@@ -1,43 +1,25 @@
 import { describe, it, expect } from "vitest";
 import { resolveConfig, tokenizeArgs, filterArgs, EGO_CLI_BLOCKED, CHROME_BLOCKED } from "../src/config.ts";
 
-describe("dual capture config", () => {
+describe("engine config", () => {
   it("returns canonical defaults", () => {
     expect(resolveConfig({})).toEqual({
-      chromePath: "", captureBackend: "auto", streamProfile: "balanced",
-      cdpFps: 20, cdpQuality: 55, cdpMaxWidth: 960, cdpBackstopIntervalMs: 3000,
-      ffmpegFps: 20, ffmpegMaxWidth: 1280, ffmpegBitrateKbps: 4000, ffmpegEncoder: "auto", ffmpegPath: "", githubMirror: "",
+      chromePath: "",
       egoCliArgs: "", chromeArgs: "",
       engineMode: "auto", execSession: "auto",
     });
   });
 
-  it("migrates legacy CDP fields and lets canonical fields win", () => {
-    expect(resolveConfig({ castFpsCap: 60, screencastQuality: 70, screencastMaxWidth: 1200, backstopIntervalMs: 5000 })).toEqual({
-      chromePath: "", captureBackend: "auto", streamProfile: "balanced",
-      cdpFps: 30, cdpQuality: 70, cdpMaxWidth: 1200, cdpBackstopIntervalMs: 5000,
-      ffmpegFps: 20, ffmpegMaxWidth: 1280, ffmpegBitrateKbps: 4000, ffmpegEncoder: "auto", ffmpegPath: "", githubMirror: "",
-      egoCliArgs: "", chromeArgs: "",
-      engineMode: "auto", execSession: "auto",
-    });
-    expect(resolveConfig({ cdpFps: 15, castFpsCap: 30 }).cdpFps).toBe(15);
+  it("ignores removed preview-era keys instead of crashing (persisted legacy values)", () => {
+    const c = resolveConfig({ captureBackend: "ffmpeg", streamProfile: "high", cdpFps: 30, ffmpegBitrateKbps: 9000, castFpsCap: 60 } as any);
+    expect(c).toEqual(resolveConfig({}));
   });
 
-  it("falls back for invalid enums and numbers", () => {
-    const config = resolveConfig({ captureBackend: "bad", cdpFps: 99, ffmpegEncoder: "bad" } as any);
-    expect(config.captureBackend).toBe("auto");
-    expect(config.cdpFps).toBe(20);
-    expect(config.ffmpegEncoder).toBe("auto");
-  });
-
-  it("applies stream profiles unless advanced FFmpeg fields override them", () => {
-    expect(resolveConfig({ streamProfile: "low" }).ffmpegFps).toBe(15);
-    expect(resolveConfig({ streamProfile: "high" }).ffmpegMaxWidth).toBe(1600);
-    expect(resolveConfig({ streamProfile: "low" }).ffmpegBitrateKbps).toBe(2000);
-    expect(resolveConfig({ streamProfile: "high" }).ffmpegBitrateKbps).toBe(8000);
-    expect(resolveConfig({ streamProfile: "high", ffmpegBitrateKbps: 6000 }).ffmpegBitrateKbps).toBe(6000);
-    expect(resolveConfig({ streamProfile: "high", ffmpegFps: 12 }).ffmpegFps).toBe(12);
-    expect(resolveConfig({ backstopIntervalMs: 200 }).cdpBackstopIntervalMs).toBe(1000);
+  it("falls back for invalid enums and keeps valid ones", () => {
+    expect(resolveConfig({ engineMode: "bad" } as any).engineMode).toBe("auto");
+    expect(resolveConfig({ engineMode: "app" }).engineMode).toBe("app");
+    expect(resolveConfig({ execSession: "persistent" }).execSession).toBe("persistent");
+    expect(resolveConfig({ execSession: "bad" } as any).execSession).toBe("auto");
   });
 });
 

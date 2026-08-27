@@ -1,10 +1,9 @@
-# Insert ego-browser: structured browser-automation tools (30+ ego_*) that drive
-# the vendored ego-lite runtime through ctx.subprocess, plus a realtime watch
-# panel (live SSE screencast + direct mouse interaction + download capture +
-# human-verification notice + tab bar + login guide).
+# Insert ego-browser: structured browser-automation tools (30+ ego_*) that
+# drive the LOCAL official ego lite app through ctx.subprocess (vendored
+# runtime as the no-app fallback engine).
 #
 # All Config fields are optional — defaults are computed in lib/index.js
-# (vendored runtime CLI, sane maxOutputBytes / graceMs, empty defaultSpace).
+# (engineMode auto, sane maxOutputBytes / graceMs, empty defaultSpace).
 - insert:
     - id: ego-browser
       name: '@dsh-external/ego-browser'

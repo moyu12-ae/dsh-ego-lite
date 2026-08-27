@@ -67,32 +67,6 @@ export interface LoggerLike {
   error(message: unknown, ...args: unknown[]): void
 }
 
-export interface RouteHandler {
-  (req: unknown, res: unknown): void
-}
-
-export interface RegisterRouteOptions {
-  kind: string
-  path: string
-  handler: (req: unknown, res: unknown) => void | Promise<void>
-}
-
-export interface WebServerLike {
-  get?(path: string, handler: RouteHandler): unknown
-  post?(path: string, handler: RouteHandler): unknown
-  route?(path: string, handler: RouteHandler): unknown
-  use?(path: string, handler: RouteHandler): unknown
-  register?(opts: RegisterRouteOptions): () => void
-}
-
-export interface HttpServerLike {
-  get?(path: string, handler: RouteHandler): unknown
-  post?(path: string, handler: RouteHandler): unknown
-  route?(path: string, handler: RouteHandler): unknown
-  use?(path: string, handler: RouteHandler): unknown
-  register?(opts: RegisterRouteOptions): () => void
-}
-
 export interface SettingsScope {
   get(): Record<string, unknown>
   watch(cb: () => void): () => void
@@ -108,8 +82,6 @@ export interface EgoContext {
   tools: ToolRegistrar
   subprocess: SubprocessService
   logger?: LoggerLike
-  webServer?: WebServerLike
-  httpServer?: HttpServerLike
   effect?(fn: () => unknown, label?: string): unknown
   inject?(services: readonly string[], fn: (sctx: EgoContext) => void): void
   on?(event: string, fn: (...args: unknown[]) => unknown): () => void
@@ -120,18 +92,6 @@ export interface EgoContext {
 /** Resolved (post-defaults) runtime config — the canonical key set. */
 export interface ResolvedConfig {
   chromePath: string
-  captureBackend: 'auto' | 'cdp' | 'ffmpeg'
-  streamProfile: 'low' | 'balanced' | 'high'
-  cdpFps: number
-  cdpQuality: number
-  cdpMaxWidth: number
-  cdpBackstopIntervalMs: number
-  ffmpegFps: number
-  ffmpegMaxWidth: number
-  ffmpegBitrateKbps: number
-  ffmpegEncoder: 'auto' | 'software' | 'h264_mf' | 'h264_nvenc' | 'h264_qsv' | 'h264_amf' | 'h264_videotoolbox' | 'h264_vaapi'
-  ffmpegPath: string
-  githubMirror: string
   egoCliArgs: string
   chromeArgs: string
   /** Which CLI flavor executes facade scripts ('app' = official ego lite). */
@@ -142,9 +102,5 @@ export interface ResolvedConfig {
 
 /** Raw composition-layer config (may contain legacy / extra keys). */
 export interface RawConfig extends Partial<ResolvedConfig> {
-  castFpsCap?: number
-  screencastQuality?: number
-  screencastMaxWidth?: number
-  backstopIntervalMs?: number
   [key: string]: unknown
 }

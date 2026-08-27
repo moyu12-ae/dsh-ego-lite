@@ -61,6 +61,32 @@
 ### 工程重构
 - **纯 JS → TypeScript 迁移**（PR #14）：源码从 `lib/` 移至 `src/`（`src/index.ts` 工具层、`src/client/index.ts` 前端、`src/worker/ego-cast-worker.ts` worker），`lib/` 与 `bin/ego-cast-worker.mjs` 改为构建产物（预构建入库）。构建链路改 `pnpm typecheck`（tsc 类型门禁，tsconfig.json + tsconfig.client.json）+ `pnpm test`（vitest）+ `pnpm run build`（tsdown 三 bundle）。测试同步迁移 `tests/*.test.mjs` → `.test.ts` 并补 `vitest.config.ts`。`lib/` 不再手改。
 
+## [v0.9.1] - 2026-08-27
+
+浏览器驱动搜索：新增 `web_ai_search` / `web_search_plain`，用真浏览器换取免费 Google AI Mode 合成摘要，取代对 HTTP 型 `web_search` 的依赖。完整说明见 [`README-0.9.1.md`](./README-0.9.1.md)。
+
+### 新增
+- **`web_ai_search`**：打开 `google.com/search?q=<encode>&udm=50` 触发 Google AI Mode，**等合成完成**后抽取 **AI 摘要 + `[1][2][3]` 引用链接** 一起返回（`{ ok, answer, sources[], markdown }`）。自动处理异步渲染、consent/区域墙、瞬态重试；`queries` 数组支持多语言/多区域一次搜多条。
+- **`web_search_plain`**：普通 Google 结果链接列表（标题 + URL），不做 AI 合成，适合"只取材不总结"的更省场景。
+- 新增 `src/ai-search.ts`（293 行）：`buildAiSearchUrl`（CJK 正确 percent-encode、不强制 `hl/gl`，语言跟随查询内容）、`deriveSearchMarkdown`（摘要+引用一起，纯函数可测）、浏览器内脚本常量 `AI_POLL_FN`/`AI_CONSENT_FN`/`AI_EXTRACT_FN`/`PLAIN_EXTRACT_FN`、`buildAiSearchScript`/`buildPlainSearchScript`（经 `useSpace`+`ensureRealTab` 拼脚本）；常量 `SEARCH_SPACE='web-search'`、`AI_SEARCH_TIMEOUT_MS=40_000`。
+- `src/index.ts` `registerActionTools` 追加 `web_ai_search`/`web_search_plain`，`web_ai_search` 结束把 `spaceTracker.selected` 指向 `args.space || SEARCH_SPACE`。
+- `src/help.ts` `EGO_HELP_INDEX` 新增 `'ai-search'` 主题并追加两工具到 `tools` 列表。
+- 新增 `tests/ai-search.test.ts`（156 行）：URL/CJK 编码、markdown 摘要+引用、4 个 `new Function` parseOk、build 脚本行为。
+
+### 设计决策
+- **摘要 + 引用一起返回**：不只要总结，还要 `[1][2][3]` 引用锚定来源。
+- **不加 `hl`/`en`/`gl` 区域兜底**：语言跟随查询内容，跨语言用 `queries` 数组覆盖。
+- **任务空间复用**：统一 `web-search` 空间，遵循"一个目标一个空间"纪律。
+- **Path A：并存 + 引导**：新增轻量组件盖在大插件上，复用引擎/互斥锁/哨兵；**不删** `@deepseek-ai/dsh-tool-web`，HTTP 型 `web_search` 留作更省的廉价回退。
+- **抽走机制、不搬实现**：不复刻 python-google-ai-mode-skill 的 Python/Patchright 重链路，只取 `udm=50` 触发 + 完成判定 + 提取思想。
+
+### 修复
+- **`+N` 泄漏进引用标题**：正则 `(.*?)` 中 `.` 不匹配 `\n`，真实品牌标题是多行（如 `Medium\n·Hashbyt | …\n +2`）导致 `match()` 返回 `null`、尾部 `+N` 泄漏；`src/ai-search.ts` 改 `([\s\S]*?)` 跨行匹配。此前疑虑的"双转义"为本/粘贴产物，非源码 bug。
+
+### 质量门
+- `tsc` exit 0；`vitest` **78/78**（原 76 + 新增 16 含 2 个多行标题回归）；`tsdown` 重建 `lib/index.js` 116.14 kB。
+- **实机端到端验证**：首轮 `ok:true` 抽出完整 Next.js 15 答案（异步等待 11.6s，检测到 `AI 模式对话` 标题）；引用抽取 `pinned:9`（9 个唯一来源）。
+
 ## [v0.8.0] - 2026-08
 
 sidebar Tab 集成：当 `dsh-better-sidebar` 可用时，实时查看窗注册为 sidebar 原生 Tab 而非浮动浮窗。

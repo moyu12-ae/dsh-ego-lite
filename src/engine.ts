@@ -205,8 +205,13 @@ export function deriveSiteSkillsDir(binPath: string): string | null {
     // Only trust the app-bundle shape: <version dir>/Helpers — deriving from
     // an arbitrary configured binary would point the CLI at a random folder.
     if (basename(dir) !== 'Helpers') continue
-    const skills = join(dir, '..', 'Resources', 'ego-skills')
-    if (existsSync(skills)) return skills
+    const root = join(dir, '..', 'Resources', 'ego-skills')
+    // agentWorkspace() expects the skills/ego-browser LEVEL (the one holding
+    // SKILL.md and learnings/) — the repo layout nests it one deeper. Prefer
+    // the nested layout, fall back to a flat skills root.
+    const nested = join(root, 'ego-browser')
+    if (existsSync(join(nested, 'learnings'))) return nested
+    if (existsSync(join(root, 'learnings'))) return root
   }
   return null
 }

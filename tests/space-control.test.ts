@@ -179,11 +179,48 @@ describe('space-control: scroll / wait / dispatch / site tools', () => {
   })
 
   it('site tool passes site/tool/args positionally to runSiteTool', () => {
-    const s = buildSiteToolScript('google', 'search_and_extract', { query: 'hi' })
+    const s = buildSiteToolScript('google', 'search_and_extract', { query: 'hi' }, '/skills')
     expect(s).toContain('"google"')
     expect(s).toContain('"search_and_extract"')
     expect(s).toContain('{"query":"hi"}')
     expect(s).toContain("typeof runSiteTool === 'function'")
+  })
+
+  it('site tool seeds the in-script workspace hint before runSiteTool runs', () => {
+    // Regression: on the app flavor the script executes inside the ego lite
+    // app process (the CLI is an IPC client), so the skill lookup reads the
+    // APP's process.env. The hint must be assigned inside the script, before
+    // the runSiteTool call, and must not clobber an existing value.
+    const s = buildSiteToolScript('google', 'search_and_extract', {}, '/skills/dir')
+    const seedIdx = s.indexOf('process.env.EGO_BROWSER_AGENT_WORKSPACE =')
+    const useIdx = s.indexOf('__dshPick(typeof runSiteTool')
+    expect(seedIdx).toBeGreaterThanOrEqual(0)
+    expect(useIdx).toBeGreaterThan(seedIdx)
+    expect(s).toContain('if (!process.env.EGO_BROWSER_AGENT_WORKSPACE)')
+    expect(s).toContain('"/skills/dir"')
+  })
+
+  it('site tool selects a task space (when given) before runSiteTool runs', () => {
+    // Regression: google's search_and_extract calls openOrReuseTab, which needs
+    // a SELECTED space. Without the prefix the CLI fails with "listTabs: Task
+    // space not selected". The space prefix must come before the runSiteTool
+    // call when supplied, and default to an empty string when omitted.
+    const withSpace = buildSiteToolScript(
+      'google',
+      'search_and_extract',
+      {},
+      '/skills/dir',
+      'const task = await taskSpaces.useOrCreate("site-test")\n',
+    )
+    expect(withSpace.indexOf('taskSpaces.useOrCreate("site-test")')).toBeGreaterThanOrEqual(0)
+    expect(withSpace.indexOf('taskSpaces.useOrCreate("site-test")')).toBeLessThan(
+      withSpace.indexOf('__dshPick(typeof runSiteTool'),
+    )
+    expect(withSpace).toContain('__dshPick(typeof runSiteTool')
+
+    // Omitted prefix → no space selection statement appended (compat).
+    const noSpace = buildSiteToolScript('google', 'search_and_extract', {}, '/skills/dir')
+    expect(noSpace).toContain('__dshPick(typeof runSiteTool')
   })
 })
 

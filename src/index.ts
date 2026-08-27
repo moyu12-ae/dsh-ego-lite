@@ -42,7 +42,7 @@ import { EGO_HELP_INDEX } from './help.ts'
 import { HUMAN_CHECK_PROBE } from './captcha.ts'
 import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
 import { installEgoBrowserSettings } from './settings.ts'
-import { resolveEngine, buildSpawnArgv, engineEnv, type ResolvedEngine } from './engine.ts'
+import { resolveEngine, buildSpawnArgv, engineEnv, deriveSiteSkillsDir, type ResolvedEngine } from './engine.ts'
 import { ReplSession, replSupported } from './repl-session.ts'
 import { APP_FACADE_PRELUDE, withAppFacades } from './app-facades.ts'
 import {
@@ -569,12 +569,13 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
   const engine = engineOf(cfg)
   const useEvalArgv = !engine.jsRuntime
   try {
+    const __spawnEnv = engineEnv(engine, resolveEgoEnv(cfg))
     handle = subprocess.spawn({
       argv: useEvalArgv
         ? [engine.binPath, ...extraCliArgs, 'nodejs', '-e', withAppFacades('app', script)]
         : buildSpawnArgv(engine, extraCliArgs, process.execPath),
       cwd: process.cwd(),
-      env: engineEnv(engine, resolveEgoEnv(cfg)),
+      env: __spawnEnv,
       stdio: {
         stdin: { data: useEvalArgv ? '' : withAppFacades(engine.flavor, script) },
         stdout: {
@@ -2247,6 +2248,11 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           additionalProperties: true,
           description: 'Arguments passed to the site tool, e.g. { query: "..." }.',
         },
+        space: {
+          type: 'string',
+          description:
+            "Task-space name to drive in (defaults to the default space; an explicit name is created/reused via useOrCreate so the site tool's openOrReuseTab has a selected space). Complete it with ego_space_close when the goal is done.",
+        },
       },
       buildScript: (args) => {
         const site = str(args.site, '')
@@ -2254,6 +2260,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         if (site === '' || tool === '') {
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_site_tool requires site and tool' }))\n`
         }
+        // site tools actively drive a real page tab (openOrReuseTab inside the
+        // pack), so the space is the tool's job, not an orphan risk: ALWAYS
+        // useOrCreate (never the no-create fallback) so the pack has a space.
+        const spacePrefix = useSpace(
+          str(args.space, '') !== '' ? (args.space as string) : cfg.defaultSpace,
+        )
         return buildSiteToolScript(
           site,
           tool,
@@ -2261,6 +2273,13 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             string,
             unknown
           >,
+          // In-script workspace hint source: the app flavor executes the
+          // script inside the ego lite app process, so the ONLY way to point
+          // runSiteTool's skill lookup at the bundled learnings is to set the
+          // env from within the script itself (spawn-env injection dies at
+          // the IPC boundary). deriveSiteSkillsDir walks the bundle shape.
+          deriveSiteSkillsDir(cfg.engineBin) ?? '',
+          spacePrefix,
         )
       },
     }),

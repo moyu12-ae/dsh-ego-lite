@@ -129,8 +129,10 @@ describe('deriveSiteSkillsDir (official learnings packs)', () => {
       writeFileSync(helper, '#!/bin/sh\n')
       writeFileSync(join(skills, 'ego-browser', 'manifest.json'), '{}')
       // macOS resolves /var → /private/var under realpath; the first
-      // candidate directory derives from the realpathed helper.
-      expect(deriveSiteSkillsDir(helper)).toBe(realpathSync(skills))
+      // candidate directory derives from the realpathed helper. The nested
+      // `ego-browser` level (which holds learnings/) is what agentWorkspace()
+      // and runSiteTool expect as EGO_BROWSER_AGENT_WORKSPACE.
+      expect(deriveSiteSkillsDir(helper)).toBe(realpathSync(join(skills, 'ego-browser')))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

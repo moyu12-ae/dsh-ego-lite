@@ -335,14 +335,29 @@ export function buildDispatchKeyScript(
  * ego_site_tool — carrier for the official `learnings` site packs. The CLI
  * binds flat siteSkills(domains) / runSiteTool(site, tool, args); this is the
  * only surface the three official packs (google / github / x-com) need.
+ *
+ * The workspace hint is set INSIDE the script, not via spawn env: on the app
+ * flavor the official CLI is an IPC client and the script runs inside the ego
+ * lite app process (whose env the plugin cannot touch), and runSiteTool's
+ * skill lookup reads agentWorkspace() from that very same process — so a
+ * pre-assigned process.env entry is the only channel that reaches it.
  */
 export function buildSiteToolScript(
   site: string,
   tool: string,
   args: Record<string, unknown> | undefined,
+  siteSkillsDir: string,
+  spacePrefix = '',
 ): string {
   return (
+    // Respect an explicit user/env config: only fill the hint in when absent.
+    `if (!process.env.EGO_BROWSER_AGENT_WORKSPACE) process.env.EGO_BROWSER_AGENT_WORKSPACE = ${j(siteSkillsDir)}\n` +
     SPACE_PICKER_FN +
+    // runSiteTool's site packs (e.g. google search_and_extract) call
+    // openOrReuseTab, which needs a SELECTED task space. Select one first;
+    // an empty spacePrefix (no explicit space + no default) means the caller
+    // already decided the space handling (or wants to let it error cleanly).
+    spacePrefix +
     `var __run = __dshPick(typeof runSiteTool === 'function' ? runSiteTool : null, typeof site !== 'undefined' ? site : null, 'runTool')\n` +
     `var __r = await __run(${j(site)}, ${j(tool)}, ${j(args ?? {})})\n` +
     `console.log('${SPACE_CONTROL_SENTINEL}' + JSON.stringify({ ok: true, site: ${j(site)}, tool: ${j(tool)}, result: __r }))\n`

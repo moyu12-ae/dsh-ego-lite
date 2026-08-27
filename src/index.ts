@@ -45,6 +45,20 @@ import { installEgoBrowserSettings } from './settings.ts'
 import { resolveEngine, buildSpawnArgv, engineEnv, type ResolvedEngine } from './engine.ts'
 import { ReplSession, replSupported } from './repl-session.ts'
 import { APP_FACADE_PRELUDE, withAppFacades } from './app-facades.ts'
+import {
+  buildSpaceListScript,
+  buildSpaceClaimScript,
+  buildSpaceHandoffScript,
+  buildSpaceTakeoverScript,
+  buildSpaceWaitControlScript,
+  buildTabListScript,
+  buildTabSwitchScript,
+  buildTabCloseScript,
+  buildScrollToBottomScript,
+  buildWaitPageScript,
+  buildDispatchKeyScript,
+  buildSiteToolScript,
+} from './space-control.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import {
   SEARCH_SPACE,
@@ -1097,6 +1111,112 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         )} : null }))\n`,
     }),
   )
+  // ── Task-space control handoff family (v0.9.3 full-parity vs SKILL.md) ──
+  // Official semantics (helpers.ts): claimTaskSpace transfers ownership AND
+  // selects; handOff gives the space to the user (CHECK done/skipped);
+  // takeOver requires EXPLICIT user consent; waitForAgentControl is a
+  // read-only blocking poll speaking SECONDS (converted from ms here).
+  // None of these ever CREATE a space — they resolve existing ones only.
+  reg(
+    t({
+      name: 'ego_space_list',
+      description:
+        'List every ego lite task space with name, id, ownership and createdBy. Use it to find orphans to close, to locate a space before claim/handOff/takeOver, or to audit for leaked spaces.',
+      parameters: {},
+      buildScript: () => buildSpaceListScript(),
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_space_claim',
+      description:
+        'Claim a task space: transfers ownership from the user to the agent AND selects it. Use after the user explicitly agrees the agent should take over a space they were using, or to resume your own handed-off space. The space must already exist (never creates). Finish with ego_space_close.',
+      parameters: {
+        space: {
+          type: 'string',
+          required: true,
+          description: 'Task-space name or numeric id to claim. Run ego_space_list first if unsure.',
+        },
+      },
+      buildScript: (args) => {
+        const s = args.space
+        if ((typeof s !== 'string' || s === '') && typeof s !== 'number') {
+          return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_space_claim requires a space name or id (see ego_space_list)' }))\n`
+        }
+        return buildSpaceClaimScript(s as string | number)
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_space_handoff',
+      description:
+        'Hand a task space over to the user: they interact with the page in the ego lite GUI (login, CAPTCHA, payment, manual steps) while you pause. Keep your turn interactive — tell the user exactly what to do, then wait. ALWAYS check done in the result: skipped means the space is not agent-owned. Take the space back with ego_space_takeover only after the user explicitly confirms.',
+      parameters: {
+        space: {
+          type: 'string',
+          description: 'Task-space name or numeric id; defaults to the currently selected space.',
+        },
+      },
+      buildScript: (args) => {
+        const s = args.space
+        const has = (typeof s === 'string' && s !== '') || typeof s === 'number'
+        return buildSpaceHandoffScript(has ? (s as string | number) : null)
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_space_takeover',
+      description:
+        'Take a user-owned task space back under agent control. ONLY call this after the user EXPLICITLY confirmed they are done with the page — grabbing control uninvited is a hard violation of the handoff protocol. The space becomes agent-owned and selected.',
+      parameters: {
+        space: {
+          type: 'string',
+          description: 'Task-space name or numeric id; defaults to the currently selected space.',
+        },
+      },
+      buildScript: (args) => {
+        const s = args.space
+        const has = (typeof s === 'string' && s !== '') || typeof s === 'number'
+        return buildSpaceTakeoverScript(has ? (s as string | number) : null)
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_space_wait_control',
+      description:
+        'Read-only blocking poll until the agent regains control of a task space (e.g. after the user finished their manual steps and released it). Never mutates anything. Throws with a timeout message if control does not return in time. Requires an explicit space.',
+      parameters: {
+        space: {
+          type: 'string',
+          required: true,
+          description: 'Task-space name or numeric id to watch.',
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'Give up after this long (default 60000).',
+        },
+        intervalMs: {
+          type: 'number',
+          description: 'Poll interval (default 2000).',
+        },
+      },
+      buildScript: (args) => {
+        const s = args.space
+        if ((typeof s !== 'string' || s === '') && typeof s !== 'number') {
+          return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_space_wait_control requires a space name or id' }))\n`
+        }
+        return buildSpaceWaitControlScript(
+          s as string | number,
+          num(args.timeoutMs, 60000),
+          num(args.intervalMs, 2000),
+        )
+      },
+    }),
+  )
+
   reg(
     t({
       name: 'ego_snapshot',
@@ -1952,6 +2072,191 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       } as unknown as DefineToolOpts)
       return def
     })(),
+  )
+  // ── Tab-level tools + scroll/wait/dispatch + site packs (v0.9.3 parity) ──
+  reg(
+    t({
+      name: 'ego_tab_list',
+      description:
+        'List every tab in the selected task space with url, title and targetId. Use before ego_tab_switch / ego_tab_close, or to find scratch tabs to clean up before a keep:true close.',
+      parameters: {
+        space: spaceParam,
+      },
+      buildScript: (args) =>
+        buildTabListScript(spaceArg(args.space, cfg.defaultSpace)),
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_tab_switch',
+      description:
+        'Switch focus to a tab in the selected task space. The target matches by targetId, url substring, title substring, or numeric index (from ego_tab_list).',
+      parameters: {
+        target: {
+          type: 'string',
+          required: true,
+          description: 'Tab targetId, url substring, title substring, or index.',
+        },
+        space: spaceParam,
+      },
+      buildScript: (args) => {
+        const target = str(args.target, '')
+        if (target === '') {
+          return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_tab_switch requires a target' }))\n`
+        }
+        return buildTabSwitchScript(spaceArg(args.space, cfg.defaultSpace), target)
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_tab_close',
+      description:
+        'Close a tab in the selected task space. The target matches by targetId, url substring, title substring, or numeric index (from ego_tab_list). Use for scratch-tab cleanup; the task space itself is closed with ego_space_close.',
+      parameters: {
+        target: {
+          type: 'string',
+          required: true,
+          description: 'Tab targetId, url substring, title substring, or index.',
+        },
+        space: spaceParam,
+      },
+      buildScript: (args) => {
+        const target = str(args.target, '')
+        if (target === '') {
+          return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_tab_close requires a target' }))\n`
+        }
+        return buildTabCloseScript(spaceArg(args.space, cfg.defaultSpace), target)
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_scroll_to_bottom',
+      description:
+        'Drive an infinite-scroll page to the bottom: pages down in viewport steps until the document bottoms out or the optional selector appears (e.g. a "load more" sentinel or target item). Self-implemented loop, deterministic on both engines.',
+      parameters: {
+        selector: {
+          type: 'string',
+          description: 'Stop as soon as this CSS selector exists on the page.',
+        },
+        maxScrolls: {
+          type: 'number',
+          description: 'Safety cap on scroll steps (default 30).',
+        },
+        settleMs: {
+          type: 'number',
+          description: 'Wait after each step for lazy content (default 600).',
+        },
+        space: spaceParam,
+      },
+      buildScript: (args) =>
+        buildScrollToBottomScript(
+          spaceArg(args.space, cfg.defaultSpace),
+          str(args.selector, ''),
+          num(args.maxScrolls, 30),
+          num(args.settleMs, 600),
+        ),
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_wait_page',
+      description:
+        'Wait for page readiness deterministically: state=load polls document.readyState until complete; state=networkidle additionally requires the resource count to stay stable for idleMs (infinite-scroll-safe). Use after clicks that trigger full navigations or heavy loading.',
+      parameters: {
+        state: {
+          type: 'string',
+          description: "'load' (default) or 'networkidle'.",
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'Give up after this long (default 15000).',
+        },
+        idleMs: {
+          type: 'number',
+          description: 'networkidle: stability window (default 500).',
+        },
+        space: spaceParam,
+      },
+      buildScript: (args) => {
+        const state = str(args.state, 'load') === 'networkidle' ? 'networkidle' : 'load'
+        return buildWaitPageScript(
+          spaceArg(args.space, cfg.defaultSpace),
+          state,
+          num(args.timeoutMs, 15000),
+          num(args.idleMs, 500),
+        )
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_dispatch_key',
+      description:
+        'Dispatch a synthetic KeyboardEvent (keydown+keyup) at a selector or the active element — for sites that listen for raw key events on widgets without focus. Synthetic events are isTrusted:false; sites that reject them need ego_key instead.',
+      parameters: {
+        key: {
+          type: 'string',
+          required: true,
+          description: "Key value, e.g. 'Enter', 'Escape', 'ArrowDown', 'a', '1'.",
+        },
+        selector: {
+          type: 'string',
+          description: 'Target element; defaults to document.activeElement.',
+        },
+        space: spaceParam,
+      },
+      buildScript: (args) => {
+        const key = str(args.key, '')
+        if (key === '') {
+          return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_dispatch_key requires a key' }))\n`
+        }
+        return buildDispatchKeyScript(
+          spaceArg(args.space, cfg.defaultSpace),
+          key,
+          str(args.selector, ''),
+        )
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'ego_site_tool',
+      description:
+        'Run an official site-specific extraction tool from the ego-browser skill learnings packs. Known packs: site=google tools=[search_and_extract], site=github tools=[search_repos, open_issues, repo_stats], site=x-com tools=[timeline, search_users, extract_post]. The official CLI runtime executes the pack script and returns structured results.',
+      parameters: {
+        site: {
+          type: 'string',
+          required: true,
+          description: "Site pack name: 'google' | 'github' | 'x-com' (domains match automatically).",
+        },
+        tool: {
+          type: 'string',
+          required: true,
+          description: 'Tool name inside the pack, e.g. search_and_extract.',
+        },
+        args: {
+          type: 'object',
+          description: 'Arguments passed to the site tool, e.g. { query: "..." }.',
+        },
+      },
+      buildScript: (args) => {
+        const site = str(args.site, '')
+        const tool = str(args.tool, '')
+        if (site === '' || tool === '') {
+          return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_site_tool requires site and tool' }))\n`
+        }
+        return buildSiteToolScript(
+          site,
+          tool,
+          (args.args && typeof args.args === 'object' ? args.args : {}) as Record<
+            string,
+            unknown
+          >,
+        )
+      },
+    }),
   )
   // ── Google AI Mode web search (web_ai_search / web_search_plain) ──────────
   // Path A: added ON TOP of the big plugin to guide the agent to prefer a free

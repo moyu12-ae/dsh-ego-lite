@@ -26,10 +26,18 @@
 | 官方 skill 能力（SKILL.md v1.2.3） | dsh-ego-lite 对应 |
 |---|---|
 | 任务空间全周期：`useOrCreateTaskSpace` / `completeTaskSpace({keep})` / 同目标复用与收尾纪律 | `ego_space_open` / `ego_space_close`（keep 政策直接内置：默认 false + 三种正当例外写入工具描述与 open 返回的 note 字段） |
+| 空间清单与控制权交接五件套：`listTaskSpaces` / `claimTaskSpace` / `handOffTaskSpace` / `takeOverTaskSpace` / `waitForAgentControl`（v0.9.3 补齐） | `ego_space_list` / `ego_space_claim` / `ego_space_handoff` / `ego_space_takeover` / `ego_space_wait_control`——官方 ownership 语义照搬进工具描述（claim=转移+选中、handOff 必查 done/skipped、takeOver 仅限用户明确确认后、wait_control 只读阻塞且秒制换算毫秒制），且全部「只解析已存在空间、绝不顺手创建」 |
+| 标签页级操作：`listTabs` / `switchTab` / `closeTab`（v0.9.3 补齐） | `ego_tab_list` / `ego_tab_switch` / `ego_tab_close`（targetId/url子串/标题子串/序号四种匹配） |
+| 无限滚动：`scrollToBottomUntil`（v0.9.3 补齐） | `ego_scroll_to_bottom`——Node 层自实现循环，滚到底或等选择器出现，两引擎行为一致 |
+| 等待族：`waitForLoad` / `waitForNetworkIdle`（v0.9.3 补齐） | `ego_wait_page`——load 轮询 readyState、networkidle 用资源数稳定窗口，确定性自实现，不赌 helper 签名 |
+| 原始按键：`dispatchKey`（v0.9.3 补齐） | `ego_dispatch_key`——合成 KeyboardEvent 派发（key/code/keyCode 映射），免焦点 |
+| 站点经验包 learnings：google / github / x-com + `siteSkills` / `runSiteTool`（v0.9.3 补齐） | `ego_site_tool`——官方经验包运行时的结构化载体（此前只有垫片没有工具面） |
 | 语义工作流：`snapshotText()` → `@N` refs / `loc=` 选择器 | `ego_snapshot` + `ego_click/fill/hover/drag` 直吃 ref，无需模型理解快照协议 |
 | 视觉工作流：`captureScreenshot()` + 坐标/键盘操作 | `ego_screenshot`（整页 + **元素级裁剪**，后者是 skill 都没有的）+ 坐标点击 |
 | 直接 DOM / CDP 工作流：`js()` / `cdp()` | `ego_js` / `ego_cdp` / `ego_script`（多步脚本逃生舱） |
 | 辅助函数面：click/doubleClick/hover/dragMouse、selectOption、uploadFile、wait 族、pressKey/typeText、serverFetch/browserFetch、drainEvents… | 全部有对应结构化工具；装机版绑定缺失的面（`selectOption` 不在全局面、元素截图不存在、`{path}` 截图契约漂移、`completeTaskSpace` 强制 `{keep}`）由 `APP_FACADE_PRELUDE` 兼容层补齐/修复 |
+
+v0.9.3 起官方 SKILL.md 的 ~41 个 helper **全部有结构化工具对应**（41/41）。新增工具全部走「flat helper 优先、namespace 兜底」的双保险脚本（`src/space-control.ts`），官方 App 与 vendored 两引擎行为一致；滚动/等待类为确定性自实现，不赌 helper 签名。
 
 **稳定性优于裸 skill 的四层保障：**
 

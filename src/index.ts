@@ -2238,6 +2238,9 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         args: {
           type: 'object',
+          // DSH schema compiler rejects object properties without an explicit
+          // additionalProperties ("must be explicitly true or false").
+          additionalProperties: true,
           description: 'Arguments passed to the site tool, e.g. { query: "..." }.',
         },
       },

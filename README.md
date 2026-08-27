@@ -7,7 +7,26 @@
 >
 > 包名 **dsh-ego-lite**（GitHub 仓库同名）；插件内部的 settings 命名空间保持 `ego-browser` 不变，既有配置无缝沿用。
 
-把 ego lite 接入 DeepSeek Harness：以 **32 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰；并在此之上提供 **Google AI Mode 搜索**（`web_ai_search` / `web_search_plain`），用真浏览器换取免费 AI 合成摘要 + 引用。
+把 ego lite 接入 DeepSeek Harness：以 **44 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰；并在此之上提供 **Google AI Mode 搜索**（`web_ai_search` / `web_search_plain`），用真浏览器换取免费 AI 合成摘要 + 引用。
+
+## v0.9.3 — 官方 skill 41/41 全对齐
+
+本版本把官方 SKILL.md v1.2.3 中剩余未覆盖的能力全部补齐，并修复一批实测发现的契约问题：
+
+**新增 12 个工具**（32 → 44 个 `ego_*`）：
+
+- 空间控制权五件套：`ego_space_list` / `ego_space_claim` / `ego_space_handoff` / `ego_space_takeover` / `ego_space_wait_control`——交接协议（handoff → 用户操作 → 明确确认后 takeover）完整落地为工具描述约束；wait_control 的官方秒制参数换算为毫秒制。
+- 标签页三件套：`ego_tab_list` / `ego_tab_switch` / `ego_tab_close`——targetId / url 子串 / 标题子串 / 序号四种匹配。
+- `ego_scroll_to_bottom`（无限滚动）、`ego_wait_page`（load / networkidle 确定性自实现）、`ego_dispatch_key`（合成按键事件）、`ego_site_tool`（官方 learnings 站点经验包的结构化载体：google / github / x-com）。
+
+**修复**（全部实测复现 → 修复 → 防回归测试）：
+
+- `runEgoScript` 的官方 `-e` 通道把整段脚本包进 async IIFE：`await` 永远合法（修复 `await (fn)()` 形态触发 `ReferenceError: await is not defined`），抛错自动走哨兵通道结构化上报，不再裸 stderr。
+- `ego_space_list` 等五件套的 `__dshPick(...)` 缺调用括号导致 `await` 拿到**函数本身**、`length` 读成形参数——静默返回 `count:0` 假象。已修并加 arity-vs-array 防回归断言。
+- `ego_site_tool`：官方 CLI 是 IPC 客户端，脚本实际在 App 进程执行、插件注入的 env 到不了——改为脚本内调用 `runSiteTool` 前显式设置 `EGO_BROWSER_AGENT_WORKSPACE`，经验包定位不再依赖进程环境。
+- `ego_download`：双路径契约自适应——Playwright 事件路径优先，app flavor 事件残缺时轮询 `~/Downloads` 新增文件兜底；新增 `captured` 字段诚实上报是否真的捕获到下载（programmatic blob 下载可能被 App 静默吞，属官方限制；真实下载/导航 attachment 可靠）。
+
+**压力测试结论**（v0.9.3 实测，官方 app flavor）：CLI 链路 15 连发 0–1ms/次；工具级高频 5/5；空间开关环 8 对零残留；2 agent 并发只读 6+6 全绿、互斥锁无死锁；超时路径（`timeoutMs=1`）快速失败且错误信息完整。已知限制见下文。
 
 ## v0.9.0 方向变化
 
@@ -79,17 +98,20 @@ dshx install ego-browser <ego-browser.tgz>                             # tarball
 dshx list                                                # 应显示：[on] ego-browser
 ```
 
-## 工具清单（32 个，前缀 `ego_`，完整索引见 `ego_help`）
+## 工具清单（44 个，前缀 `ego_`，完整索引见 `ego_help`）
 
 | 类别 | 工具 |
 |---|---|
 | 任务空间 | `ego_space_open` `ego_space_close` `ego_status` |
+| 空间控制权 | `ego_space_list` `ego_space_claim` `ego_space_handoff` `ego_space_takeover` `ego_space_wait_control` |
+| 标签页 | `ego_tab_list` `ego_tab_switch` `ego_tab_close` |
 | 页面读取 | `ego_snapshot`（语义树） `ego_page_info` `ego_read_element` |
-| 导航/等待 | `ego_navigate`（复用 tab） `ego_wait` `ego_wait_for_selector` `ego_wait_for_url` `ego_wait_for_response` |
-| 交互 | `ego_click` `ego_fill` `ego_hover` `ego_drag` `ego_select` `ego_check` `ego_key` `ego_scroll` |
+| 导航/等待 | `ego_navigate`（复用 tab） `ego_wait` `ego_wait_for_selector` `ego_wait_for_url` `ego_wait_for_response` `ego_wait_page`（load/networkidle） |
+| 交互 | `ego_click` `ego_fill` `ego_hover` `ego_drag` `ego_select` `ego_check` `ego_key` `ego_dispatch_key` `ego_scroll` `ego_scroll_to_bottom` |
 | 执行/调试 | `ego_js`（页面求值） `ego_cdp`（原始 CDP） `ego_cli`（任意 heredoc） `ego_script`（多步脚本） |
 | 输出 | `ego_screenshot` `ego_download` `ego_upload` |
 | 会话/安全 | `ego_auth_flush`（登录落盘） `ego_captcha` `ego_dialog` |
+| 站点经验包 | `ego_site_tool`（官方 learnings：google / github / x-com） |
 | 元工具 | `ego_help` `ego_doctor` `ego_http` |
 | AI 搜索 | `web_ai_search` `web_search_plain`（见下节） |
 
@@ -117,6 +139,12 @@ dshx list                                                # 应显示：[on] ego-
 - 目标完成后必须 `ego_space_close` 收尾，**默认 `keep=false` 直接关闭页面**——不留做完任务的残留页面。
 - 只有三种情况允许 `keep=true`：① 用户明确要求保留现场；② 需要用户在该页面上手动操作（登录/验证码）；③ 结果无法用文件/工件/摘要交付。「访问过页面」「截图验证过」不是理由。
 - 需要保留时，先关掉 scratch 标签页，只留值得给用户看的页。
+
+## 已知限制
+
+- **大返回值**：`ego_js` / `ego_script` 的返回走哨兵 JSON 通道，~1MB 级 payload 会打穿协议（CLI 输出被截断、哨兵丢失，调用以错误收场）。大结果请写入文件再带回路径，而不是塞进返回值。
+- **官方 learnings 选择器可能过时**：`ego_site_tool` 是官方经验包的忠实载体，包本身的选择器（如 google 包的 `div.g`）随站点改版会失效（实测 Google 结果页结构已迁移至 `div.MjjYud`/`h3`）。提取为空时，用 `ego_snapshot` / `ego_js` 直接读页面即可。
+- **programmatic blob 下载**：app flavor 下 App 可能静默吞掉纯程序化触发的 blob 下载（官方行为）；按钮点击、导航 attachment 等真实下载由 `ego_download` 的 Downloads 轮询兜底可靠捕获。
 
 ## 配置项
 

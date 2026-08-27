@@ -497,6 +497,23 @@ function disposeReplQuietly(cfg: Pick<EgoRuntimeConfig, 'replSession'>): void {
   }
 }
 
+/**
+ * Wrap a script body for the official `-e` eval channel.
+ *
+ * Measured reality (ego lite 0.4.7.3): the eval body tolerates plain
+ * `await page.*(...)` calls, yet an `await (fn)()` combination dies with
+ * `ReferenceError: await is not defined` — the channel's top-level await
+ * resolution is form-sensitive (sloppy-mode identifier vs keyword). Wrapping
+ * the whole body in an async IIFE makes `await` unconditionally legal
+ * regardless of form, and routes any thrown error into the sentinel channel
+ * so failures surface as structured errors instead of raw stderr.
+ */
+function wrapEvalBody(script: string): string {
+  return (
+    `;(async () => {\n${script}\n})().catch(e => { console.log('${SENTINEL}' + JSON.stringify({ ok: false, error: String((e && e.message) || e) })) })\n`
+  )
+}
+
 async function runEgoScript(subprocess: SubprocessService, script: string, exec: ExecLike, cfg: EgoRuntimeConfig, graceOverrideMs?: number): Promise<WarmupResult> {
   const extraCliArgs = filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
 
@@ -572,7 +589,7 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
     const __spawnEnv = engineEnv(engine, resolveEgoEnv(cfg))
     handle = subprocess.spawn({
       argv: useEvalArgv
-        ? [engine.binPath, ...extraCliArgs, 'nodejs', '-e', withAppFacades('app', script)]
+        ? [engine.binPath, ...extraCliArgs, 'nodejs', '-e', withAppFacades('app', wrapEvalBody(script))]
         : buildSpawnArgv(engine, extraCliArgs, process.execPath),
       cwd: process.cwd(),
       env: __spawnEnv,
@@ -1889,7 +1906,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
     t({
       name: 'ego_download',
       description:
-        'Wait for a file download triggered by the current action, then return its saved path. Provide `triggerSelector` (a download button/link to click) or `triggerScript` (arbitrary JS that triggers the download). The file is captured into a temp dir and (optionally) copied to `savePath`. Returns { path, suggestedFilename, url }.',
+        'Wait for a file download triggered by the current action, then return its saved path. Provide `triggerSelector` (a download button/link to click) or `triggerScript` (arbitrary JS that triggers the download). The file is captured into a temp dir and (optionally) copied to `savePath`. Returns { captured, path, suggestedFilename, url }: capture works via the download event (vendored runtime) or by polling the Downloads folder for a new file (official app). Known limitation: on the official app flavor a purely programmatic blob download may be swallowed by the app itself — real downloads (button clicks, attachment-URL navigations) are captured reliably.',
       parameters: {
         triggerSelector: {
           type: 'string',
@@ -1925,17 +1942,57 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
               : '/* no trigger given — the download may be started by an earlier navigation */\n'
         const save =
           savePath !== ''
-            ? `const __final = await __dl.saveAs(${j(savePath)}).catch(()=>null)\n`
-            : `const __final = await __dl.path().catch(()=>null)\n`
+            ? `    __path = await __dl.saveAs(${j(savePath)}).catch(() => null)\n`
+            : `    __path = await __dl.path().catch(() => null)\n`
         return (
           `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
-          `const __dlPromise = page.waitForEvent('download', { timeout: ${timeout} })\n` +
+          // Contract-adaptive download capture. Preferred path: Playwright-style
+          // page.waitForEvent('download') (vendored runtime). On the app flavor
+          // the event resolves into a shapeless object and the file lands in
+          // ~/Downloads via the app's own download flow — so fall back to
+          // snapshotting ~/Downloads before the trigger and polling for a NEW
+          // entry afterwards (requires the Node modules the app process
+          // exposes to scripts).
+          `let __dshFs = null, __dshOs = null\n` +
+          `try { __dshFs = await import('node:fs'); __dshOs = await import('node:os') } catch {}\n` +
+          `const __dlDir = __dshOs ? __dshOs.homedir() + '/Downloads' : null\n` +
+          `const __dlSnap = () => { try { return __dshFs.readdirSync(__dlDir).map(n => { const s = __dshFs.statSync(__dlDir + '/' + n); return n + ':' + Math.round(s.mtimeMs) }).join('|') } catch { return '' } }\n` +
+          `const __dlBefore = __dlSnap()\n` +
+          `const __dlWait = page.waitForEvent('download', { timeout: ${timeout} }).catch(e => ({ __waitErr: String(e) }))\n` +
           trigger +
-          `const __dl = await __dlPromise\n` +
-          `const __name = typeof __dl.suggestedFilename === 'function' ? __dl.suggestedFilename() : null\n` +
-          `const __url = typeof __dl.url === 'function' ? __dl.url() : null\n` +
+          `let __dl = null\ntry { __dl = await __dlWait } catch (e) { __dl = { __waitErr: String(e) } }\n` +
+          `let __path = null, __name = null, __url = null\n` +
+          `if (__dl && typeof __dl.suggestedFilename === 'function') {\n` +
+          `  __name = (typeof __dl.suggestedFilename === 'function' ? __dl.suggestedFilename() : null) ?? null\n` +
+          `  __url = (typeof __dl.url === 'function' ? __dl.url() : null) ?? null\n` +
           save +
-          `console.log('${SENTINEL}' + JSON.stringify({ ok: true, path: __final, suggestedFilename: __name, url: __url }))\n`
+          `}\n` +
+          `if (!__path && __dshFs && __dlDir) {\n` +
+          `  const __deadline = Date.now() + Math.max(5000, ${timeout})\n` +
+          `  while (Date.now() < __deadline && !__path) {\n` +
+          `    const __now = __dlSnap()\n` +
+          `    if (__now !== __dlBefore) {\n` +
+          `      const __seen = new Set(__dlBefore ? __dlBefore.split('|') : [])\n` +
+          `      const __fresh = __now.split('|').find(e => !__seen.has(e))\n` +
+          `      if (__fresh) {\n` +
+          `        const __fname = __fresh.split(':')[0]\n` +
+          `        if (!__fname.startsWith('._') && !__fname.endsWith('.crdownload') && !__fname.endsWith('.download') && __fname !== '.DS_Store') {\n` +
+          `          __path = __dlDir + '/' + __fname\n` +
+          `          __name = __fname\n` +
+          `        }\n` +
+          `      }\n` +
+          `    }\n` +
+          `    if (!__path) await page.waitForTimeout(500)\n` +
+          `  }\n` +
+          `}\n` +
+          `let __final = __path\n` +
+          (savePath !== ''
+            ? `if (__final && __final !== ${j(savePath)} && __dshFs) { try { __dshFs.copyFileSync(__final, ${j(savePath)}); __final = ${j(savePath)} } catch {}\n}\n`
+            : '') +
+          // captured:false = the app swallowed the download entirely (known
+          // app-flavor limitation for programmatic blob downloads) — honest
+          // signal, never a fake success.
+          `console.log('${SENTINEL}' + JSON.stringify({ ok: true, captured: !!(__path || __name), path: __final, suggestedFilename: __name, url: __url }))\n`
         )
       },
     }),

@@ -50,6 +50,22 @@ describe('space-control: handoff family scripts', () => {
     expect(OUT(s)).toBe('sentinel-present')
   })
 
+  it('list CALLS the picked helper (arity-vs-array regression)', () => {
+    // Regression: __dshPick RETURNS the helper function. Without the trailing
+    // () the awaited `__spaces` IS the function, and `__spaces.length` is its
+    // parameter count (0 for listTaskSpaces) — the silent "count: 0" bug that
+    // also broke every target-resolving script's __spaces.find lookup.
+    const s = buildSpaceListScript()
+    const pickCall = s.indexOf("__dshPick(typeof listTaskSpaces")
+    expect(pickCall).toBeGreaterThanOrEqual(0)
+    const closing = s.indexOf(')()', pickCall)
+    expect(closing).toBeGreaterThan(pickCall)
+    expect(closing).toBeLessThan(s.indexOf('var __spaces = await') + 200)
+    // every consumer of LIST_SPACES_HEAD resolves __spaces as a real array
+    expect(s).toContain('__spaces.length')
+    expect(s).not.toMatch(/var __spaces = await __dshPick\(/)
+  })
+
   it('claim resolves the target then claims via id??name', () => {
     const s = buildSpaceClaimScript(42)
     expect(s).toContain(buildSpaceResolveSnippet(42))

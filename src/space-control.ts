@@ -49,7 +49,10 @@ export const SPACE_PICKER_FN = `function __dshPick(flat, nsObj, nsKey){
 `
 
 const LIST_EXPR =
-  `__dshPick(typeof listTaskSpaces === 'function' ? listTaskSpaces : null, typeof taskSpaces !== 'undefined' ? taskSpaces : null, 'list')`
+  // NOTE the trailing () — __dshPick RETURNS the helper function; without the
+  // call `__spaces` would BE the function and `__spaces.length` its arity
+  // (0 for listTaskSpaces) — the silent "count: 0" bug.
+  `(__dshPick(typeof listTaskSpaces === 'function' ? listTaskSpaces : null, typeof taskSpaces !== 'undefined' ? taskSpaces : null, 'list'))()`
 
 /** Lists all spaces into `__spaces` (used by every target-resolving builder). */
 export const LIST_SPACES_HEAD = SPACE_PICKER_FN + `var __spaces = await ` + LIST_EXPR + `\n`

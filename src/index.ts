@@ -86,7 +86,7 @@ export interface ActiveSpaceTracker {
 /** Build the script that runs the probe and emits a sentinel payload. */
 function humanCheckScript(space: string | number): string {
   return (
-    `${useSpace(space)}${ensureRealTab()}` +
+    `${useSpaceFallback(space)}${ensureRealTab()}` +
     `let __hc = null\n` +
     `try { __hc = await page.evaluate(${j(HUMAN_CHECK_PROBE)}) } catch { __hc = null }\n` +
     `console.log('${SENTINEL}' + JSON.stringify({ ok: true, humanCheck: __hc }))\n`
@@ -629,8 +629,43 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
 }
 // ── tool plumbing ───────────────────────────────────────────────────────────
 /** JS snippet that pins an action tool to one task space. */
-const useSpace = (name: string | number): string =>
-  `const task = await taskSpaces.useOrCreate(${j(name)})\n`
+/**
+ * Select the task space a tool acts on.
+ *
+ * Explicit names always useOrCreate (creating a space is the expected outcome
+ * for ego_space_open / a named target). But when a tool FALLS BACK to the
+ * default 'dsh-agent' placeholder (no explicit space was given and no active
+ * workspace was opened), calling useOrCreate would materialise a brand-new
+ * blank 'dsh-agent' space that nothing ever drives — the orphaned space seen
+ * in the UI. Keep 'dsh-agent' as a fallback that NEVER creates: reuse an
+ * existing 'dsh-agent' if one is already open, else error and ask the agent to
+ * ego_space_open(name) first.
+ */
+const RESOLVE_SPACE = (name: string | number, isFallback: boolean): string =>
+  isFallback
+    ? `const __spaces = await taskSpaces.list()\n` +
+      `const __cur = ${j(name)}\n` +
+      `let __space = __spaces.find(s => String(s.id) === String(__cur) || String(s.name) === String(__cur)) ?? null\n` +
+      `if (!__space) throw new Error(${j(
+        'no active task space: call ego_space_open(<goal name>) before acting, or pass a specific space',
+      )}\n)\n` +
+      `await taskSpaces.switch(__space.id ?? __space.name)\n` +
+      `const task = __space\n`
+    : `const task = await taskSpaces.useOrCreate(${j(name)})\n`
+
+const useSpace = (name: string | number): string => RESOLVE_SPACE(name, false)
+/** Select the fallback default space WITHOUT creating it (orphan-space guard). */
+const useSpaceFallback = (name: string | number): string => RESOLVE_SPACE(name, true)
+/**
+ * Resolve a tool's space argument the way the buildScript wants:
+ * an explicit (non-empty) `space` targets/creates that space; an absent one
+ * falls back to the default WITHOUT creating it, so a stray navigation/observe
+ * call never spawns an orphaned 'dsh-agent' space.
+ */
+const spaceArg = (v: unknown, fb: string | number): string => {
+  const has = (typeof v === 'string' && v !== '') || typeof v === 'number'
+  return has ? useSpace(v as string | number) : useSpaceFallback(fb)
+}
 /**
  * JS snippet that makes the harness act on a real page tab.
  *
@@ -1078,7 +1113,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // The host can return an empty DOM capture right after a navigation;
         // retry briefly so a mid-load snapshot does not come back empty.
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `let s = ${call}\n` +
           `let tries = 0\n` +
           `while (!(s.content ?? '') && tries < 3) { await page.waitForTimeout(400); s = ${call}; tries++ }\n` +
@@ -1129,7 +1164,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // navigate the active tab so we don't pile up tabs.
         // NOTE: ensureRealTab() already declares `__tabs`, so reuse it.
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `const __existing = __tabs.find(t => t.url.split('#')[0] === ${j(
             u.split('#')[0],
           )})\n` +
@@ -1201,7 +1236,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             : `await page.mouse.click(${x}, ${y})`
         }
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `${action}\n` +
           `const pginfo = await page.info()\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, double: ${dbl}, page: pginfo }))\n`
@@ -1229,7 +1264,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: spaceParam,
       },
       buildScript: (args) =>
-        `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
         `await page.locator(${j(str(args.selector, ''))}).fill(${j(
           str(args.text, ''),
         )})\n` +
@@ -1251,7 +1286,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: spaceParam,
       },
       buildScript: (args) =>
-        `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
         `${SAFE_FN}` +
         `const result = await page.evaluate(${j(str(args.expression, ''))})\n` +
         `console.log('${SENTINEL}' + JSON.stringify({ ok: true, result: safe(result) }))\n`,
@@ -1282,7 +1317,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             ? `await cdp(${j(str(args.method, ''))}, ${j(params)})`
             : `await cdp(${j(str(args.method, ''))})`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `${SAFE_FN}` +
           `const result = ${call}\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, result: safe(result) }))\n`
@@ -1315,7 +1350,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             ? `await page.locator(${j(sel)}).screenshot(${pth ? `{ path: ${j(pth)} }` : ''})`
             : `await page.screenshot(${pth ? `{ path: ${j(pth)} }` : ''})`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `const path = ${shot}\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, path }))\n`
         )
@@ -1331,7 +1366,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: spaceParam,
       },
       buildScript: (args) =>
-        `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
         `const pginfo = await page.info()\n` +
         `let __hc = null\n` +
         `try { __hc = await page.evaluate(${j(HUMAN_CHECK_PROBE)}).catch(() => null); } catch { __hc = null }\n` +
@@ -1386,7 +1421,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         if (sel === '')
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, waited: false, reason: 'ego_wait_for_selector: selector is required' }))\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `await page.waitForSelector(${j(sel)}, { state: ${j(
             str(args.state, 'visible'),
           )}, timeout: ${num(args.timeout, 10000)} })\n` +
@@ -1420,7 +1455,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         if (p === '')
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reached: false, reason: 'ego_wait_for_url: pattern is required' }))\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `const __ok = await page.waitForURL(${j(p)}, { timeout: ${num(
             args.timeout,
             10000,
@@ -1459,7 +1494,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         const mode = str(args.body, 'none')
         const wantBody = mode === 'text' || mode === 'json'
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `const __res = await page.waitForResponse(${j(u)}, { timeout: ${num(
             args.timeout,
             10000,
@@ -1493,7 +1528,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         const k = str(args.key, '').trim()
         if (txt !== '') {
           return (
-            `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+            `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
             `await page.keyboard.type(${j(txt)})\n` +
             `console.log('${SENTINEL}' + JSON.stringify({ ok: true, typed: ${j(txt)} }))\n`
           )
@@ -1501,7 +1536,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         if (k === '')
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_key: provide key or text to type' }))\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `await page.keyboard.press(${j(k)})\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, key: ${j(k)} }))\n`
         )
@@ -1528,7 +1563,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         if (sel === '' && !hasXY)
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_hover: provide selector or both x and y' }))\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           (sel !== ''
             ? `await page.locator(${j(sel)}).hover()\n`
             : `await page.mouse.move(${args.x}, ${args.y})\n`) +
@@ -1576,7 +1611,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           default: expr = `await ${selExpr}.textContent()`
         }
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `${SAFE_FN}` +
           `const __v = ${expr}\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, what: ${j(what)}, selector: ${j(
@@ -1605,7 +1640,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: spaceParam,
       },
       buildScript: (args) =>
-        `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
         `await page.locator(${j(str(args.selector, ''))}).selectOption(${j(
           args.value ?? '',
         )})\n` +
@@ -1650,7 +1685,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             )}))\n`
           : `const __pts = ${j(pts)}\nconst __coords=[];for(let __i=0;__i<__pts.length;__i+=2){__coords.push([__pts[__i],__pts[__i+1]])}\nawait page.mouse.drag(__coords)\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           action +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true }))\n`
         )
@@ -1683,7 +1718,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
               300,
             )})\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           action +
           `const __p = await page.info()\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, scrollX: __p.sx ?? null, scrollY: __p.sy ?? null }))\n`
@@ -1710,7 +1745,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: spaceParam,
       },
       buildScript: (args) =>
-        `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
         `await page.locator(${j(str(args.selector, ''))}).setInputFiles(${j(
           str(args.path, ''),
         )})\n` +
@@ -1762,7 +1797,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             ? `const __final = await __dl.saveAs(${j(savePath)}).catch(()=>null)\n`
             : `const __final = await __dl.path().catch(()=>null)\n`
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `const __dlPromise = page.waitForEvent('download', { timeout: ${timeout} })\n` +
           trigger +
           `const __dl = await __dlPromise\n` +
@@ -1787,7 +1822,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       buildScript: (args) => {
         const chk = bool(args.checked, true)
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `await page.locator(${j(str(args.selector, ''))}).${chk ? 'check' : 'uncheck'}()\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, checked: ${chk} }))\n`
         )
@@ -1814,7 +1849,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // JS is paused, so a Runtime.evaluate would hang. handleJavaScriptDialog
         // is a CDP command and works even under a blocking dialog.
         return (
-          `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
           `const __r = await cdp("Page.handleJavaScriptDialog", ${params}).catch((e) => ({ error: String(e) }))\n` +
           `const __ok = !!(__r && !__r.error)\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, handled: __ok, accept: ${accept}, error: __r?.error ?? null }))\n`
@@ -1844,7 +1879,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         }
         if (str(args.body, '') !== '') opts.body = str(args.body, '')
         const mode = str(args.mode, 'browser')
-        const pre = mode === 'server' ? '' : `${useSpace(str(args.space, cfg.defaultSpace))}${ensureRealTab()}`
+        const pre = mode === 'server' ? '' : `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}`
         return (
           `${pre}${SAFE_FN}` +
           `const __r = await fetch.${mode === 'server' ? 'server' : 'browser'}(${j(
@@ -1949,7 +1984,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
             ),
           )
           if (!result.ok)
-            return { ok: false, detected: false, kind: null, error: result.error }
+            throw new Error(result.error)
           const p = (parseSentinel(result.stdout) ?? (parseSentinel(result.stderr) || {})) as Record<string, unknown>
           const hc = p.humanCheck as { detected?: boolean; kind?: string } | undefined
           return {

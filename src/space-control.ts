@@ -323,7 +323,7 @@ export function buildDispatchKeyScript(
     spacePre +
     `var __js = (typeof js === 'function') ? js : (typeof page !== 'undefined' && page && page.evaluate)\n` +
     `if (typeof __js !== 'function') throw new Error('[dsh-ego-lite] no js/page.evaluate helper on this engine')\n` +
-    `var __r = await __js('(function(){var el=${targetExpr};if(!el)return{ok:false,reason:"no target element"};var init={key:${j(key)},code:${j(code)},keyCode:${kc},which:${kc},bubbles:true,cancelable:true};el.dispatchEvent(new KeyboardEvent("keydown",init));el.dispatchEvent(new KeyboardEvent("keyup",init));return{ok:true,key:init.key,code:init.code,target:(el.tagName||"").toLowerCase()}}})()')\n` +
+    `var __r = await __js('(function(){var el=${targetExpr};if(!el)return{ok:false,reason:"no target element"};var init={key:${j(key)},code:${j(code)},keyCode:${kc},which:${kc},bubbles:true,cancelable:true};el.dispatchEvent(new KeyboardEvent("keydown",init));el.dispatchEvent(new KeyboardEvent("keyup",init));return{ok:true,key:init.key,code:init.code,target:(el.tagName||"").toLowerCase()}})()')\n` +
     `var __o = (typeof __r === 'string') ? JSON.parse(__r) : __r\n` +
     `console.log('${SPACE_CONTROL_SENTINEL}' + JSON.stringify({ ok: true, dispatched: __o, note: ${j(
       'synthetic event (isTrusted:false); for real keystrokes use ego_key',

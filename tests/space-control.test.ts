@@ -113,6 +113,22 @@ describe('space-control: tab tools', () => {
     }
   })
 
+  it('dispatch-key expression is a balanced IIFE (no stray brace)', () => {
+    // Regression: the embedded IIFE ended with '}}})()' — one brace too many,
+    // so Runtime.evaluate died with SyntaxError: Unexpected token '}'.
+    for (const s of [
+      buildDispatchKeyScript('', 'Escape', ''),
+      buildDispatchKeyScript('', 'a', '#input'),
+    ]) {
+      expect(s).toContain('toLowerCase()}})()')
+      expect(s).not.toContain('}}})()')
+      // Every embedded expression opens exactly one function body.
+      const opens = (s.match(/\(function\(\)\{/g) || []).length
+      const closes = (s.match(/\}\}\)\(\)/g) || []).length
+      expect(closes).toBe(opens)
+    }
+  })
+
   it('tab switch/close find by targetId/url/title/index and pass targetId', () => {
     for (const s of [buildTabSwitchScript('', 'https://x'), buildTabCloseScript('', 'docs')]) {
       expect(s).toContain('__dshFindTab(__tabs, ')

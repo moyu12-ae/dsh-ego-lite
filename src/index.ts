@@ -46,6 +46,12 @@ import { resolveEngine, buildSpawnArgv, engineEnv, type ResolvedEngine } from '.
 import { ReplSession, replSupported } from './repl-session.ts'
 import { APP_FACADE_PRELUDE, withAppFacades } from './app-facades.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
+import {
+  SEARCH_SPACE,
+  buildAiSearchScript,
+  buildPlainSearchScript,
+  resolveAutoClose,
+} from './ai-search.ts'
 import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec } from './types.ts'
 
 export const name = 'ego-browser'
@@ -1946,6 +1952,84 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       } as unknown as DefineToolOpts)
       return def
     })(),
+  )
+  // ── Google AI Mode web search (web_ai_search / web_search_plain) ──────────
+  // Path A: added ON TOP of the big plugin to guide the agent to prefer a free
+  // AI-synthesised summary + citations over the cheap HTTP web_search. We reuse
+  // the space lifecycle: one task space per user goal, stale space reused, never
+  // an orphan. `useSpace`/`ensureRealTab` come from this module's scope.
+  // NOTE: these tools deliberately DON'T declare `space` in the schema that
+  // t()'s space tracking loop would consume as args.space — they resolve their
+  // own target via `useSpace(SEARCH_SPACE)` so the default is real, non-orphan
+  // reuse. Passing an explicit `space` (SEARCH_SPACE) is allowed for a named
+  // workspace. `afterExecute` marks the space active only when result is ok.
+  reg(
+    t({
+      name: 'web_ai_search',
+      description:
+        'Google AI Mode search — returns an AI-synthesised summary WITH its source citations together (markdown with [1][2][3] refs). Trigger: https://www.google.com/search?...&udm=50. Reuses the browser/task-space from ego-browser; keeps any login state; handles the async AI render (consent + region wall + retry). PREFER this over plain web_search when you want a synthesised answer + cited sources. `queries` is an array so you can search multiple languages/regions in one call (e.g. ["无职转生 动画", "無職転生 アニメ"]); search language follows the query content (no forced hl).',
+      parameters: {
+        queries: {
+          type: 'array',
+          items: { type: 'string' },
+          required: true,
+          description:
+            'One or more search queries. Each becomes its own Google AI Mode search; results are concatenated in order. Pass multiple to cover languages/regions.',
+        },
+        space: {
+          type: 'string',
+          description:
+            `Task-space name; defaults to the dedicated '${SEARCH_SPACE}' space (reused across calls; complete it with ego_space_close when the goal is done).`,
+        },
+        keep: {
+          type: 'boolean',
+          description:
+            `Keep the search space open after the run (default false). When false and the space is the dedicated '${SEARCH_SPACE}' one, the tool auto-completes it so it never leaks (the summary+citations are already returned, so the page is not needed). Set true to keep browsing from a citation link. A caller-passed non-default space is never auto-closed.`,
+        },
+      },
+      buildScript: (args) => buildAiSearchScript(args, useSpace, ensureRealTab),
+      afterExecute: (args) => {
+        // Mark the resolved search space active so later browsing continuations
+        // land in it — BUT only when the tool did NOT auto-complete it. If it
+        // auto-closed (default keep=false on the dedicated space), record the
+        // close so the tracker doesn't point at a now-dead space.
+        const target = typeof args.space === 'string' && args.space !== '' ? args.space : SEARCH_SPACE
+        if (resolveAutoClose(target, bool(args.keep, false))) cfg.spaceTracker.closed(target, true)
+        else cfg.spaceTracker.selected(target)
+      },
+    }),
+  )
+  reg(
+    t({
+      name: 'web_search_plain',
+      description:
+        'Plain Google result-link search — returns a list of result titles+URLs (NO AI synthesis). Lighter/faster than web_ai_search; use it when you only need the raw links, not a summarised answer. `queries` is an array for multi-language/region coverage.',
+      parameters: {
+        queries: {
+          type: 'array',
+          items: { type: 'string' },
+          required: true,
+          description:
+            'One or more search queries. Each is a plain Google result-links search; results are concatenated in order.',
+        },
+        space: {
+          type: 'string',
+          description:
+            `Task-space name; defaults to the dedicated '${SEARCH_SPACE}' space (reused across calls; complete it with ego_space_close when the goal is done).`,
+        },
+        keep: {
+          type: 'boolean',
+          description:
+            `Keep the search space open after the run (default false). When false and the space is the dedicated '${SEARCH_SPACE}' one, the tool auto-completes it so it never leaks. Set true to keep browsing from a result link. A caller-passed non-default space is never auto-closed.`,
+        },
+      },
+      buildScript: (args) => buildPlainSearchScript(args, useSpace, ensureRealTab),
+      afterExecute: (args) => {
+        const target = typeof args.space === 'string' && args.space !== '' ? args.space : SEARCH_SPACE
+        if (resolveAutoClose(target, bool(args.keep, false))) cfg.spaceTracker.closed(target, true)
+        else cfg.spaceTracker.selected(target)
+      },
+    }),
   )
 }
 

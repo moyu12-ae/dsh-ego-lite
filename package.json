@@ -1,6 +1,6 @@
 {
   "name": "dsh-ego-lite",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "dsh-ego-lite - the structured DSH <=> ego lite bridge: 32 ego_* tools driving the LOCAL official ego lite app. A no-PR personal rework based on Fisfzy/dsh-ego-browser v0.8.0 and the official CitroLabs/ego-lite ego-skills/ego-browser skill.",
   "private": true,
   "type": "module",

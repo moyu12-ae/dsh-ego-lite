@@ -517,6 +517,10 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
             cfg.engineBin,
             Math.max(10_000, cfg.graceMs),
             cfg.maxOutputBytes,
+            // Same env contract as the per-call spawn path — keeps the
+            // EGO_BROWSER_AGENT_WORKSPACE learnings hint flowing into the
+            // long-lived REPL process too.
+            engineEnv(engineOf(cfg), resolveEgoEnv(cfg)),
           )
           await cfg.replSession.launch()
           // App flavor: install the namespaced-facade compat layer ONCE per

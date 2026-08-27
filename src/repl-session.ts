@@ -112,6 +112,11 @@ export class ReplSession {
     private readonly binPath: string,
     private readonly bootTimeoutMs: number,
     maxOutputBytes = 4 * 1024 * 1024,
+    /** Extra/overriding env for the CLI process (engineEnv output). When
+     *  omitted the REPL inherits plain process.env — which misses the
+     *  EGO_BROWSER_AGENT_WORKSPACE hint engineEnv injects for app spawns,
+     *  leaving official learnings site packs unresolvable. */
+    private readonly envOverride: NodeJS.ProcessEnv | null = null,
   ) {
     this.stdoutCap = maxOutputBytes + 64 * 1024
   }
@@ -127,7 +132,7 @@ export class ReplSession {
     // -q: quiet; /dev/null: discard the typescript copy (we read the pipe).
     const child = spawn(SCRIPT_BIN, ['-q', '/dev/null', this.binPath, 'nodejs'], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, TERM: 'dumb' },
+      env: { ...(this.envOverride ?? process.env), TERM: 'dumb' },
     })
     this.child = child
 

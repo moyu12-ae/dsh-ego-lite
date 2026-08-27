@@ -166,6 +166,9 @@ export const TAB_FIND_FN = `function __dshFindTab(tabs, t){
 `
 
 const LIST_TABS_HEAD =
+  // __dshPick comes from SPACE_PICKER_FN: the tab bodies call it, so the
+  // definition must ride along (regression-tested in space-control.test.ts).
+  SPACE_PICKER_FN +
   TAB_FIND_FN +
   `var __tabs = await __dshPick(typeof listTabs === 'function' ? listTabs : null, typeof browser !== 'undefined' ? browser : null, 'listTabs')()\n`
 

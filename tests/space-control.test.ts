@@ -97,6 +97,22 @@ describe('space-control: tab tools', () => {
     expect(s).toContain("'listTabs')")
   })
 
+  it('tab scripts DEFINE __dshPick before calling it (no ReferenceError)', () => {
+    // Regression: tab bodies call __dshPick but LIST_TABS_HEAD only carried
+    // TAB_FIND_FN — the picker definition (SPACE_PICKER_FN) was missing, so
+    // every tab tool died with "ReferenceError: __dshPick is not defined".
+    for (const s of [
+      buildTabListScript(''),
+      buildTabSwitchScript('', 'example.com'),
+      buildTabCloseScript('', 'example.com'),
+    ]) {
+      const defIdx = s.indexOf('function __dshPick')
+      const useIdx = s.indexOf('__dshPick(')
+      expect(defIdx).toBeGreaterThanOrEqual(0)
+      expect(useIdx).toBeGreaterThan(defIdx)
+    }
+  })
+
   it('tab switch/close find by targetId/url/title/index and pass targetId', () => {
     for (const s of [buildTabSwitchScript('', 'https://x'), buildTabCloseScript('', 'docs')]) {
       expect(s).toContain('__dshFindTab(__tabs, ')

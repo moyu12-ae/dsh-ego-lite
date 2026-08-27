@@ -61,6 +61,20 @@
 ### 工程重构
 - **纯 JS → TypeScript 迁移**（PR #14）：源码从 `lib/` 移至 `src/`（`src/index.ts` 工具层、`src/client/index.ts` 前端、`src/worker/ego-cast-worker.ts` worker），`lib/` 与 `bin/ego-cast-worker.mjs` 改为构建产物（预构建入库）。构建链路改 `pnpm typecheck`（tsc 类型门禁，tsconfig.json + tsconfig.client.json）+ `pnpm test`（vitest）+ `pnpm run build`（tsdown 三 bundle）。测试同步迁移 `tests/*.test.mjs` → `.test.ts` 并补 `vitest.config.ts`。`lib/` 不再手改。
 
+## [v0.9.2] - 2026-08-27
+
+修复 `web_ai_search` / `web_search_plain` 的任务空间清理盲点：合并 PR #1（`fix/ai-search-space-cleanup`）。
+
+### 修复
+- **工具自有空间不再泄漏**：`web_ai_search` / `web_search_plain` 内部通过 `useSpace` 复用专注的 `SEARCH_SPACE='web-search'`，但从不把它 `taskSpaces.complete` 掉——摘要+引用既已返回、页面不再需要，工具退出后该空间便成为清理盲点（实测目标结束后留下一个闲置 `web-search` 空间）。新增 `resolveAutoClose`（`!keep && resolvedSpace === SEARCH_SPACE`）与 `buildAutoCloseSnippet()`：空默认空间且 `keep=false` 时，两个 builder 尾部都发射 `try{ await taskSpaces.complete(resolvedSpace,{keep:false}) }catch{}`，载荷带上 `space` + `kept`。
+- **`keep` 参数语义**：两工具 schema 新增 `keep`（默认 `false`）。默认关闭自有 `web-search` 空间；调用方传入**非默认**空间时**永不**自动关闭（那是代理的目标空间）；`keep:true` 保留页面用于浏览引用。
+- **空间追踪同步**：`afterExecute` 改用 `resolveAutoClose(target, bool(args.keep,false))`——自动关闭时 `cfg.spaceTracker.closed(target,true)`，否则 `selected(target)`。
+- 新增 `tests/ai-search.test.ts` +10：`resolveAutoClose` / `buildAutoCloseSnippet` / 两 builder 的 `kept` 与自动关闭发射行为。
+
+### 质量门
+- `tsc` exit 0；`vitest` **88/88**（原 78 + 新增 10）；`tsdown` 重建 `lib/index.js` 119.04 kB。
+- 提交 `cfbdb04`（`fix/ai-search-space-cleanup`）经 PR #1 合并进 `main`（merge `6f04f98`）；远端其余 4 个旧合并分支已清理。
+
 ## [v0.9.1] - 2026-08-27
 
 浏览器驱动搜索：新增 `web_ai_search` / `web_search_plain`，用真浏览器换取免费 Google AI Mode 合成摘要，取代对 HTTP 型 `web_search` 的依赖。完整说明见 [`README-0.9.1.md`](./README-0.9.1.md)。

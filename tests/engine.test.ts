@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
-import { resolveEngine, buildSpawnArgv, engineEnv, type EngineIo } from "../src/engine.ts";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolveEngine, buildSpawnArgv, engineEnv, deriveSiteSkillsDir, type EngineIo } from "../src/engine.ts";
 
 const HOME = "/home/tester";
 
@@ -115,3 +117,26 @@ describe("buildSpawnArgv / engineEnv", () => {
     expect(engineEnv(js as never, base).EGO_LINUX_CHROME).toBe("/chrome");
   });
 });
+
+describe('deriveSiteSkillsDir (official learnings packs)', () => {
+  it('resolves Resources/ego-skills next to a bundle Helpers helper', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ego-engine-'))
+    try {
+      const helper = join(root, 'ego lite.app', 'Contents', 'Frameworks', 'ego Framework.framework', 'Versions', '0.4.7.3', 'Helpers', 'ego-browser')
+      const skills = join(root, 'ego lite.app', 'Contents', 'Frameworks', 'ego Framework.framework', 'Versions', '0.4.7.3', 'Resources', 'ego-skills')
+      mkdirSync(join(helper, '..'), { recursive: true })
+      mkdirSync(join(skills, 'ego-browser', 'learnings'), { recursive: true })
+      writeFileSync(helper, '#!/bin/sh\n')
+      writeFileSync(join(skills, 'ego-browser', 'manifest.json'), '{}')
+      // macOS resolves /var → /private/var under realpath; the first
+      // candidate directory derives from the realpathed helper.
+      expect(deriveSiteSkillsDir(helper)).toBe(realpathSync(skills))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+  it('returns null for non-bundle paths (vendored/configured binaries)', () => {
+    expect(deriveSiteSkillsDir('/usr/local/bin/ego-browser')).toBe(null)
+    expect(deriveSiteSkillsDir('/definitely/not/here')).toBe(null)
+  })
+})

@@ -18,7 +18,8 @@
  *  4. vendored default.
  */
 
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -183,14 +184,46 @@ const EGO_LINUX_ENV_KEYS = [
 ] as const
 
 /**
+ * Locate the app bundle's official `ego-skills` directory (SKILL.md +
+ * `learnings/` site packs) next to the resolved helper:
+ * <bundle>/Contents/Frameworks/<fw>/Versions/<v>/Helpers/ego-browser →
+ * sibling Resources/ego-skills. The CLI resolves site packs relative to
+ * EGO_BROWSER_AGENT_WORKSPACE and sets no default of its own, so without
+ * this hint `runSiteTool` cannot find the bundled learnings. Symlinked
+ * entrypoints (~/.local/bin/ego-browser) are realpathed first. Returns
+ * null outside an app install (vendored manages its own workspace).
+ */
+export function deriveSiteSkillsDir(binPath: string): string | null {
+  const candidates: string[] = []
+  try {
+    candidates.push(dirname(realpathSync(binPath)))
+  } catch {
+    /* unresolvable path — fall through to the literal dirname */
+  }
+  candidates.push(dirname(binPath))
+  for (const dir of candidates) {
+    // Only trust the app-bundle shape: <version dir>/Helpers — deriving from
+    // an arbitrary configured binary would point the CLI at a random folder.
+    if (basename(dir) !== 'Helpers') continue
+    const skills = join(dir, '..', 'Resources', 'ego-skills')
+    if (existsSync(skills)) return skills
+  }
+  return null
+}
+
+/**
  * Env for one invocation. The vendored flavor gets the full auto-adapted env
  * (chrome discovery/headless/proxy bridging); the app flavor deliberately gets
  * NONE of those keys — the user's running app owns its browser, and leaking
- * Linux-shim hints at the official binary could only confuse it.
+ * Linux-shim hints at the official binary could only confuse it. The one
+ * exception: EGO_BROWSER_AGENT_WORKSPACE pointing at the bundle's own
+ * ego-skills so official `learnings` site packs (google/github/x-com) resolve.
  */
 export function engineEnv(engine: ResolvedEngine, vendoredEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (engine.flavor === 'vendored') return vendoredEnv
   const env: NodeJS.ProcessEnv = { ...vendoredEnv }
   for (const key of EGO_LINUX_ENV_KEYS) delete env[key]
+  const siteSkills = deriveSiteSkillsDir(engine.binPath)
+  if (siteSkills) env.EGO_BROWSER_AGENT_WORKSPACE = siteSkills
   return env
 }

@@ -7,7 +7,7 @@
 >
 > 包名 **dsh-ego-lite**（GitHub 仓库同名）；插件内部的 settings 命名空间保持 `ego-browser` 不变，既有配置无缝沿用。
 
-把 ego lite 接入 DeepSeek Harness：以 **32 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰。
+把 ego lite 接入 DeepSeek Harness：以 **32 个结构化 `ego_*` 工具**驱动浏览器，让 agent 在**独立的任务空间**里复用你的登录态干活，不与你的日常浏览互相打扰；并在此之上提供 **Google AI Mode 搜索**（`web_ai_search` / `web_search_plain`），用真浏览器换取免费 AI 合成摘要 + 引用。
 
 ## v0.9.0 方向变化
 
@@ -83,6 +83,23 @@ dshx list                                                # 应显示：[on] ego-
 | 输出 | `ego_screenshot` `ego_download` `ego_upload` |
 | 会话/安全 | `ego_auth_flush`（登录落盘） `ego_captcha` `ego_dialog` |
 | 元工具 | `ego_help` `ego_doctor` `ego_http` |
+| AI 搜索 | `web_ai_search` `web_search_plain`（见下节） |
+
+## 浏览器驱动搜索：Google AI Mode（`web_ai_search` / `web_search_plain`）
+
+覆盖通用检索需求，**取代/引导**对廉价 HTTP `web_search` 的使用：一点点额外开销（真浏览器渲染），换来**免费的 Google AI 合成摘要 + 带引用链接**。两者都复用上述同一条引擎/互斥锁/任务空间链路，与所有 `ego_*` 工具完全兼容、可交错使用。
+
+| 工具 | 说明 |
+|---|---|
+| `web_ai_search` | 触发 Google AI Mode（`google.com/search?…&udm=50`），返回**AI 合成摘要 + 引用链接一起**（markdown，`[1][2][3]` 引用）。自动处理异步渲染 + consent/区域墙 + 重试；多语言/多区域用 `queries` 数组一次搜多条。**需要「摘要 + 引用」时优先用它。** |
+| `web_search_plain` | 纯 Google 结果链接（无 AI 合成），更快更轻，只要原始链接时用。 |
+
+设计要点：
+
+- **语言跟随查询内容**：不硬编码 `hl=en`/`gl=us` 区域兜底——搜索语言由查询本身决定（如 `["无职转生 动画", "無職転生 アニメ"]` 同时覆盖中/日两种区域）。
+- **摘要 + 引用一起返回**，绝不只给摘要。引用 DOM 已固定（生产渲染实测），并带多级兜底：若固定卡片选择器漂移，退回内联品牌/标记锚点，再退全量解码外链——退化成更少的引用，但永不丢。
+- **多空间纪律**：复用同一个任务空间（默认 `web-search`），针对用户目标复用；完成后 `ego_space_close` 收尾。
+- **机制抽取、不搬实现**：只借鉴 `udm=50` 触发 + 完成检测的思想，不复制上游 python/Patchright 重实现。
 
 ## 任务空间生命周期（重要纪律）
 

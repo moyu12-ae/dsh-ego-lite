@@ -1894,7 +1894,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             runEgoScript(ctx.subprocess, script, exec, cfg),
           )
           if (!result.ok) throw new Error(result.error)
-          const parsed = parseSentinel(result.stdout)
+          const parsed = parseSentinel(result.stdout) ?? parseSentinel(result.stderr)
           return {
             ok: true,
             stdout: result.stdout,
@@ -1950,7 +1950,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
           )
           if (!result.ok)
             return { ok: false, detected: false, kind: null, error: result.error }
-          const p = (parseSentinel(result.stdout) || {}) as Record<string, unknown>
+          const p = (parseSentinel(result.stdout) ?? (parseSentinel(result.stderr) || {})) as Record<string, unknown>
           const hc = p.humanCheck as { detected?: boolean; kind?: string } | undefined
           return {
             ok: true,
@@ -2127,7 +2127,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
           const durationMs = Date.now() - start
           if (!result.ok)
             return { ok: false, stdout: result.stdout, stderr: result.stderr, durationMs, timedOut: false, error: result.error }
-          const parsed = parseSentinel(result.stdout)
+          const parsed = parseSentinel(result.stdout) ?? parseSentinel(result.stderr)
           return {
             ok: true,
             stdout: result.stdout,

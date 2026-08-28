@@ -44,17 +44,19 @@ export const AI_SEARCH_TIMEOUT_MS = 40_000
 /**
  * Whether a search run should auto-complete its own task space.
  *
- * The search tools reuse the dedicated `SEARCH_SPACE` (or the caller's explicit
- * `space`) via `useSpace`, but completing that space is otherwise a cleanup
- * blind spot: the agent only closes spaces it opens itself via `ego_space_open`,
- * so a tool-owned space would leak. Default `keep` is false → auto-complete the
- * space after the run (summary+citations are already returned, so the page is
- * not needed). A caller wanting to keep browsing from a citation passes
- * `keep:true`, which is respected. We deliberately do NOT auto-close a
- * caller-passed non-default space — that space is the agent's live goal space.
+ * The search tools use a per-agent namespaced default (`web-search@<agent>`,
+ * or the plain `SEARCH_SPACE` when no agent identity exists — see
+ * agentSearchSpace in index.ts) or the caller's explicit `space` via `useSpace`,
+ * but completing that space is otherwise a cleanup blind spot: the agent only
+ * closes spaces it opens itself via `ego_space_open`, so a tool-owned space
+ * would leak. Default `keep` is false → auto-complete the space after the run
+ * (summary+citations are already returned, so the page is not needed). A caller
+ * wanting to keep browsing from a citation passes `keep:true`, which is
+ * respected. We deliberately do NOT auto-close a caller-passed non-default
+ * space — that space is the agent's live goal space.
  */
 export function resolveAutoClose(resolvedSpace: string, keep: boolean): boolean {
-  return !keep && resolvedSpace === SEARCH_SPACE
+  return !keep && resolvedSpace.startsWith(SEARCH_SPACE)
 }
 
 /**
@@ -203,11 +205,12 @@ export function buildAiSearchScript(
   args: Record<string, unknown>,
   useSpace: (name: string) => string,
   ensureRealTab: () => string,
+  defaultSpace: string = SEARCH_SPACE,
 ): string {
   const queries = (Array.isArray(args.queries) ? args.queries : []).filter(
     (q): q is string => typeof q === 'string' && q.trim() !== '',
   )
-  const resolvedSpace = str(args.space, SEARCH_SPACE) as string
+  const resolvedSpace = str(args.space, defaultSpace) as string
   const keep = bool(args.keep, false)
   if (queries.length === 0) {
     return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'web_ai_search: queries must be a non-empty array of strings' }))\n`
@@ -285,11 +288,12 @@ export function buildPlainSearchScript(
   args: Record<string, unknown>,
   useSpace: (name: string) => string,
   ensureRealTab: () => string,
+  defaultSpace: string = SEARCH_SPACE,
 ): string {
   const queries = (Array.isArray(args.queries) ? args.queries : []).filter(
     (q): q is string => typeof q === 'string' && q.trim() !== '',
   )
-  const resolvedSpace = str(args.space, SEARCH_SPACE) as string
+  const resolvedSpace = str(args.space, defaultSpace) as string
   const keep = bool(args.keep, false)
   if (queries.length === 0) {
     return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'web_search_plain: queries must be a non-empty array of strings' }))\n`

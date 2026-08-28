@@ -103,6 +103,21 @@ export interface ActiveSpaceTracker {
   closed(space: string | number, done: boolean): void
 }
 
+/**
+ * Per-agent space tracker container. Each harness conversation (agent) gets
+ * its own active-space state so two sessions running in parallel can never
+ * reroute each other's omitted-`space` calls (the old plugin-wide singleton
+ * was last-writer-wins across sessions — see fix/per-session-space-isolation).
+ * Calls that carry no agent identity (e.g. host-level invocations) share the
+ * legacy `shared` tracker.
+ */
+export interface AgentSpaceTrackerMap {
+  /** Tracker for THIS caller's agent; `shared` when the call has no agent. */
+  for(agent: unknown): ActiveSpaceTracker
+  /** Legacy shared tracker used when a call has no agent identity. */
+  readonly shared: ActiveSpaceTracker
+}
+
 /** Build the script that runs the probe and emits a sentinel payload. */
 function humanCheckScript(space: string | number): string {
   return (
@@ -113,7 +128,7 @@ function humanCheckScript(space: string | number): string {
   )
 }
 
-export function createActiveSpaceTracker(defaultSpace: string | number = DEFAULT_SPACE): ActiveSpaceTracker {
+function createSingleSpaceTracker(defaultSpace: string | number): ActiveSpaceTracker {
   let activeSpace: string | number = defaultSpace
   let activeName: string | null = typeof defaultSpace === 'string' ? defaultSpace : null
   return {
@@ -133,6 +148,23 @@ export function createActiveSpaceTracker(defaultSpace: string | number = DEFAULT
         activeSpace = defaultSpace
         activeName = typeof defaultSpace === 'string' ? defaultSpace : null
       }
+    },
+  }
+}
+
+export function createActiveSpaceTracker(defaultSpace: string | number = DEFAULT_SPACE): AgentSpaceTrackerMap {
+  const shared = createSingleSpaceTracker(defaultSpace)
+  const perAgent = new WeakMap<object, ActiveSpaceTracker>()
+  return {
+    shared,
+    for(agent: unknown): ActiveSpaceTracker {
+      if (agent === null || typeof agent !== 'object') return shared
+      let tracker = perAgent.get(agent)
+      if (!tracker) {
+        tracker = createSingleSpaceTracker(defaultSpace)
+        perAgent.set(agent, tracker)
+      }
+      return tracker
     },
   }
 }
@@ -444,7 +476,7 @@ function parseSentinel(stdout: string): Record<string, unknown> | undefined {
 interface EgoRuntimeConfig {
   egoBin: string
   configuredDefaultSpace: string | number
-  spaceTracker: ActiveSpaceTracker
+  spaceTracker: AgentSpaceTrackerMap
   readonly defaultSpace: string | number
   maxOutputBytes: number
   graceMs: number
@@ -683,6 +715,14 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
  * existing 'dsh-agent' if one is already open, else error and ask the agent to
  * ego_space_open(name) first.
  */
+// Echo line emitted right after a script binds its task space. The transport
+// parses it and injects `value.space = { id, name }` into the tool result, so
+// the model can self-check WHERE a call actually landed (misrouted defaults
+// become visible instead of silently hitting another goal's page).
+const SPACE_ECHO_PREFIX = '@DSH_SPACE@'
+const SPACE_ECHO_SNIPPET =
+  `console.log('${SPACE_ECHO_PREFIX}' + JSON.stringify({ id: task.id ?? null, name: task.name ?? null }))\n`
+
 const RESOLVE_SPACE = (name: string | number, isFallback: boolean): string =>
   isFallback
     ? `const __spaces = await taskSpaces.list()\n` +
@@ -692,8 +732,9 @@ const RESOLVE_SPACE = (name: string | number, isFallback: boolean): string =>
         'no active task space: call ego_space_open(<goal name>) before acting, or pass a specific space',
       )}\n)\n` +
       `await taskSpaces.switch(__space.id ?? __space.name)\n` +
-      `const task = __space\n`
-    : `const task = await taskSpaces.useOrCreate(${j(name)})\n`
+      `const task = __space\n` +
+      SPACE_ECHO_SNIPPET
+    : `const task = await taskSpaces.useOrCreate(${j(name)})\n` + SPACE_ECHO_SNIPPET
 
 const useSpace = (name: string | number): string => RESOLVE_SPACE(name, false)
 /** Select the fallback default space WITHOUT creating it (orphan-space guard). */
@@ -701,13 +742,35 @@ const useSpaceFallback = (name: string | number): string => RESOLVE_SPACE(name, 
 /**
  * Resolve a tool's space argument the way the buildScript wants:
  * an explicit (non-empty) `space` targets/creates that space; an absent one
- * falls back to the default WITHOUT creating it, so a stray navigation/observe
- * call never spawns an orphaned 'dsh-agent' space.
+ * falls back to THIS agent's most recently opened/selected space WITHOUT
+ * creating it, so a stray navigation/observe call never spawns an orphaned
+ * 'dsh-agent' space — and never lands in another conversation's space either
+ * (per-agent tracker; the shared tracker is only a no-agent fallback).
  */
-const spaceArg = (v: unknown, fb: string | number): string => {
+const spaceArg = (v: unknown, cfg: EgoRuntimeConfig, exec?: ToolExec): string => {
   const has = (typeof v === 'string' && v !== '') || typeof v === 'number'
-  return has ? useSpace(v as string | number) : useSpaceFallback(fb)
+  return has ? useSpace(v as string | number) : useSpaceFallback(defaultSpaceFor(cfg, exec))
 }
+/** This caller's fallback space (per-agent tracker; shared when no agent). */
+const defaultSpaceFor = (cfg: EgoRuntimeConfig, exec?: ToolExec): string | number =>
+  cfg.spaceTracker.for(exec?.agent).current()
+
+/** Short stable suffix derived from an agent id (djb2 → base36, 6 chars). */
+function agentShortId(agent: unknown): string {
+  const raw = (agent as { id?: unknown } | null | undefined)?.id
+  const text = typeof raw === 'string' ? raw : String(raw ?? '')
+  let hash = 5381
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) >>> 0
+  return hash.toString(36).padStart(6, '0').slice(0, 6)
+}
+
+/**
+ * The search tools' own dedicated space name, namespaced per agent so two
+ * conversations searching in parallel don't share (and auto-close each other's)
+ * space. Falls back to the plain shared name when no agent identity exists.
+ */
+const agentSearchSpace = (exec?: ToolExec): string =>
+  exec?.agent ? `${SEARCH_SPACE}@${agentShortId(exec.agent)}` : SEARCH_SPACE
 /**
  * JS snippet that makes the harness act on a real page tab.
  *
@@ -744,8 +807,31 @@ interface EgoToolOptions {
   name: string
   description: string
   parameters: Record<string, unknown>
-  buildScript: (args: Record<string, unknown>) => string
-  afterExecute?: (args: Record<string, unknown>, value: unknown) => void
+  buildScript: (args: Record<string, unknown>, exec?: ToolExec) => string
+  afterExecute?: (args: Record<string, unknown>, value: unknown, exec?: ToolExec) => void
+}
+
+/** Extract the `@DSH_SPACE@` echo a script printed when it bound its space. */
+function parseSpaceEcho(stdout: string | undefined, stderr: string | undefined): { id: string | number | null; name: string | null } | null {
+  for (const text of [stderr, stdout]) {
+    if (!text) continue
+    const lines = text.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (line.startsWith(SPACE_ECHO_PREFIX)) {
+        try {
+          const parsed = JSON.parse(line.slice(SPACE_ECHO_PREFIX.length)) as { id?: unknown; name?: unknown }
+          return {
+            id: (typeof parsed.id === 'string' || typeof parsed.id === 'number') ? parsed.id : null,
+            name: typeof parsed.name === 'string' ? parsed.name : null,
+          }
+        } catch {
+          return null
+        }
+      }
+    }
+  }
+  return null
 }
 
 function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOptions): ToolHandle {
@@ -760,7 +846,7 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
     timeoutMs: TOOL_TIMEOUT_MS,
     execute: async (args: Record<string, unknown>, exec: ToolExec) =>
       withEgoLock(async () => {
-        const script = opts.buildScript(args)
+        const script = opts.buildScript(args, exec)
         // A first-call cold Chromium can make the spawn fail transiently
         // ("CDP channel is not open" etc.); retry only that case so a warmed
         // browser connects on a later attempt without masking real errors.
@@ -768,7 +854,12 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
           runEgoScript(ctx.subprocess, script, exec, cfg),
         )
         if (!result.ok) throw new Error(result.error)
-        if (typeof opts.afterExecute === 'function') opts.afterExecute(args, result.value)
+        if (typeof opts.afterExecute === 'function') opts.afterExecute(args, result.value, exec)
+        const value = result.value as Record<string, unknown> | null
+        if (value && typeof value === 'object' && !Array.isArray(value) && value.space === undefined) {
+          const echo = parseSpaceEcho(result.stdout, result.stderr)
+          if (echo) value.space = echo
+        }
         // Value is JSON.parse output of our own payload — fits the tool JSON contract.
         return result.value
       }),
@@ -821,7 +912,10 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     engineMode: initialResolved.engineMode,
     configuredDefaultSpace: (config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE,
     spaceTracker,
-    get defaultSpace() { return this.spaceTracker.current() },
+    // Fallback view (shared tracker) — only used by logs and no-exec contexts.
+    // Tool calls MUST go through spaceArg/defaultSpaceFor(cfg, exec) so the
+    // per-agent tracker is consulted instead.
+    get defaultSpace() { return this.spaceTracker.shared.current() },
     maxOutputBytes: (config.maxOutputBytes as number | undefined) ?? DEFAULT_MAX_OUTPUT_BYTES,
     graceMs: (config.graceMs as number | undefined) ?? DEFAULT_GRACE_MS,
     // Live getter: reads from the settings bridge so GUI edits take effect on
@@ -1070,28 +1164,31 @@ function registerAuthFlush(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: T
 function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: ToolHandle) => void): void {
   const t = (opts: EgoToolOptions): ToolHandle => defineEgoTool(ctx, cfg, {
     ...opts,
-    afterExecute: (args, result) => {
+    afterExecute: (args, result, exec) => {
       if (!result || (result as Record<string, unknown>).ok === false) return
+      // Per-agent bookkeeping: each conversation tracks its own active space,
+      // so one session's open/close/select can never reroute another's.
+      const tracker = cfg.spaceTracker.for(exec?.agent)
       if (opts.name === 'ego_space_open') {
-        cfg.spaceTracker.opened(args as { name?: string | number }, result as { id?: string | number; name?: string; done?: boolean })
+        tracker.opened(args as { name?: string | number }, result as { id?: string | number; name?: string; done?: boolean })
       } else if (opts.name === 'ego_space_close') {
-        cfg.spaceTracker.closed(args.name as string | number, (result as { done?: boolean }).done as boolean)
+        tracker.closed(args.name as string | number, (result as { done?: boolean }).done as boolean)
       } else if (args && args.space !== undefined && args.space !== '') {
-        cfg.spaceTracker.selected(args.space as string | number)
+        tracker.selected(args.space as string | number)
       }
-      opts.afterExecute?.(args, result)
+      opts.afterExecute?.(args, result, exec)
     },
   })
   const spaceParam = {
     type: 'string',
     description:
-      'Task-space name or numeric id; defaults to the most recently opened or explicitly selected space.',
+      "Task-space name or numeric id; defaults to THIS conversation's most recently opened or explicitly selected space (per-conversation state — parallel conversations never reroute each other).",
   }
   reg(
     t({
       name: 'ego_space_open',
       description:
-        'Open (or reuse) an ego-lite task space — an isolated browsing context that inherits your login state. It becomes the active space for later ego_* calls that omit `space`. Reuse the same space for follow-ups on the same goal; ALWAYS call ego_space_close when the goal is done — never leave a space hanging.',
+        'Open (or reuse) an ego-lite task space — an isolated browsing context that inherits your login state. It becomes the active space for later ego_* calls that omit `space` (isolated per conversation). Reuse the same space for follow-ups on the same goal; ALWAYS call ego_space_close when the goal is done — never leave a space hanging. Names are GLOBAL: prefer passing the returned numeric `id` as `space` in later calls, because two conversations reusing the same name share one space.',
       parameters: {
         name: {
           type: 'string',
@@ -1100,10 +1197,10 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             'Short name for the active user goal, e.g. "search github issues". Reuse the same name for follow-ups on the same goal.',
         },
       },
-      buildScript: (args) =>
-        `${useSpace(str(args.name, cfg.defaultSpace))}` +
+      buildScript: (args, exec) =>
+        `${useSpace(str(args.name, defaultSpaceFor(cfg, exec)))}` +
         `console.log('${SENTINEL}' + JSON.stringify({ ok: true, id: task.id ?? null, name: task.name ?? ${j(
-          str(args.name, cfg.defaultSpace),
+          str(args.name, defaultSpaceFor(cfg, exec)),
         )}, note: ${j('reuse this space for follow-ups; when the goal is done run ego_space_close (keep defaults to false)')} }))\n`,
     }),
   )
@@ -1124,9 +1221,9 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             'Keep the live page open (default false). Only set true for the concrete reasons above; when keeping, first close scratch tabs so only pages worth showing remain.',
         },
       },
-      buildScript: (args) =>
+      buildScript: (args, exec) =>
         `const res = await taskSpaces.complete(${j(
-          str(args.name, cfg.defaultSpace),
+          str(args.name, defaultSpaceFor(cfg, exec)),
         )}, { keep: ${bool(args.keep, false)} })\n` +
         `console.log('${SENTINEL}' + JSON.stringify({ ok: true, done: !!res.done, skipped: !!res.skipped, reason: res.skipped ? ${j(
           'target space was not agent-owned',
@@ -1160,7 +1257,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description: 'Task-space name or numeric id to claim. Run ego_space_list first if unsure.',
         },
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const s = args.space
         if ((typeof s !== 'string' || s === '') && typeof s !== 'number') {
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_space_claim requires a space name or id (see ego_space_list)' }))\n`
@@ -1180,7 +1277,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description: 'Task-space name or numeric id; defaults to the currently selected space.',
         },
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const s = args.space
         const has = (typeof s === 'string' && s !== '') || typeof s === 'number'
         return buildSpaceHandoffScript(has ? (s as string | number) : null)
@@ -1198,7 +1295,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description: 'Task-space name or numeric id; defaults to the currently selected space.',
         },
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const s = args.space
         const has = (typeof s === 'string' && s !== '') || typeof s === 'number'
         return buildSpaceTakeoverScript(has ? (s as string | number) : null)
@@ -1225,7 +1322,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description: 'Poll interval (default 2000).',
         },
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const s = args.space
         if ((typeof s !== 'string' || s === '') && typeof s !== 'number') {
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_space_wait_control requires a space name or id' }))\n`
@@ -1252,7 +1349,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             "snapshot scope: 'full_page' (default) or 'only_within_viewport'.",
         },
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const scope = str(args.scope, '')
         const call =
           scope === ''
@@ -1261,7 +1358,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // The host can return an empty DOM capture right after a navigation;
         // retry briefly so a mid-load snapshot does not come back empty.
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `let s = ${call}\n` +
           `let tries = 0\n` +
           `while (!(s.content ?? '') && tries < 3) { await page.waitForTimeout(400); s = ${call}; tries++ }\n` +
@@ -1297,7 +1394,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const u = str(args.url, '')
         // Schema marks url required, but never silently navigate to a
         // hard-coded example page on a non-conforming empty value — report
@@ -1312,7 +1409,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // navigate the active tab so we don't pile up tabs.
         // NOTE: ensureRealTab() already declares `__tabs`, so reuse it.
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `const __existing = __tabs.find(t => t.url.split('#')[0] === ${j(
             u.split('#')[0],
           )})\n` +
@@ -1359,7 +1456,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const sel = str(args.selector, '')
         const x = args.x as number | undefined
         const y = args.y as number | undefined
@@ -1384,7 +1481,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             : `await page.mouse.click(${x}, ${y})`
         }
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `${action}\n` +
           `const pginfo = await page.info()\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, double: ${dbl}, page: pginfo }))\n`
@@ -1411,8 +1508,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) =>
-        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+      buildScript: (args, exec) =>
+        `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
         `await page.locator(${j(str(args.selector, ''))}).fill(${j(
           str(args.text, ''),
         )})\n` +
@@ -1433,8 +1530,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) =>
-        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+      buildScript: (args, exec) =>
+        `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
         `${SAFE_FN}` +
         `const result = await page.evaluate(${j(str(args.expression, ''))})\n` +
         `console.log('${SENTINEL}' + JSON.stringify({ ok: true, result: safe(result) }))\n`,
@@ -1458,14 +1555,14 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const params = args.params
         const call =
           params !== undefined && params !== null
             ? `await cdp(${j(str(args.method, ''))}, ${j(params)})`
             : `await cdp(${j(str(args.method, ''))})`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `${SAFE_FN}` +
           `const result = ${call}\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, result: safe(result) }))\n`
@@ -1490,7 +1587,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const sel = str(args.selector, '')
         const pth = str(args.path, '')
         const shot =
@@ -1498,7 +1595,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             ? `await page.locator(${j(sel)}).screenshot(${pth ? `{ path: ${j(pth)} }` : ''})`
             : `await page.screenshot(${pth ? `{ path: ${j(pth)} }` : ''})`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `const path = ${shot}\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, path }))\n`
         )
@@ -1513,8 +1610,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       parameters: {
         space: spaceParam,
       },
-      buildScript: (args) =>
-        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+      buildScript: (args, exec) =>
+        `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
         `const pginfo = await page.info()\n` +
         `let __hc = null\n` +
         `try { __hc = await page.evaluate(${j(HUMAN_CHECK_PROBE)}).catch(() => null); } catch { __hc = null }\n` +
@@ -1533,7 +1630,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           description: 'Milliseconds to wait.',
         },
       },
-      buildScript: (args) =>
+      buildScript: (args, exec) =>
         `await page.waitForTimeout(${Math.max(0, num(args.ms, 1000))})\n` +
         `console.log('${SENTINEL}' + JSON.stringify({ ok: true, waitedMs: ${Math.max(
           0,
@@ -1564,12 +1661,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const sel = str(args.selector, '').trim()
         if (sel === '')
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, waited: false, reason: 'ego_wait_for_selector: selector is required' }))\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `await page.waitForSelector(${j(sel)}, { state: ${j(
             str(args.state, 'visible'),
           )}, timeout: ${num(args.timeout, 10000)} })\n` +
@@ -1598,12 +1695,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const p = str(args.pattern, '').trim()
         if (p === '')
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reached: false, reason: 'ego_wait_for_url: pattern is required' }))\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `const __ok = await page.waitForURL(${j(p)}, { timeout: ${num(
             args.timeout,
             10000,
@@ -1637,12 +1734,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const u = str(args.url, '').trim()
         const mode = str(args.body, 'none')
         const wantBody = mode === 'text' || mode === 'json'
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `const __res = await page.waitForResponse(${j(u)}, { timeout: ${num(
             args.timeout,
             10000,
@@ -1671,12 +1768,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const txt = str(args.text, '')
         const k = str(args.key, '').trim()
         if (txt !== '') {
           return (
-            `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+            `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
             `await page.keyboard.type(${j(txt)})\n` +
             `console.log('${SENTINEL}' + JSON.stringify({ ok: true, typed: ${j(txt)} }))\n`
           )
@@ -1684,7 +1781,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         if (k === '')
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_key: provide key or text to type' }))\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `await page.keyboard.press(${j(k)})\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, key: ${j(k)} }))\n`
         )
@@ -1705,13 +1802,13 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         y: { type: 'number', description: 'Viewport y (only with x).' },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const sel = str(args.selector, '')
         const hasXY = typeof args.x === 'number' && typeof args.y === 'number'
         if (sel === '' && !hasXY)
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_hover: provide selector or both x and y' }))\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           (sel !== ''
             ? `await page.locator(${j(sel)}).hover()\n`
             : `await page.mouse.move(${args.x}, ${args.y})\n`) +
@@ -1742,7 +1839,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const sel = str(args.selector, '').trim()
         const what = str(args.what, 'text')
         if (sel === '')
@@ -1759,7 +1856,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           default: expr = `await ${selExpr}.textContent()`
         }
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `${SAFE_FN}` +
           `const __v = ${expr}\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, what: ${j(what)}, selector: ${j(
@@ -1787,8 +1884,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) =>
-        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+      buildScript: (args, exec) =>
+        `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
         `await page.locator(${j(str(args.selector, ''))}).selectOption(${j(
           args.value ?? '',
         )})\n` +
@@ -1819,7 +1916,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const pts = Array.isArray(args.points)
           ? (args.points as unknown[]).map(Number).filter((n) => Number.isFinite(n))
           : []
@@ -1833,7 +1930,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             )}))\n`
           : `const __pts = ${j(pts)}\nconst __coords=[];for(let __i=0;__i<__pts.length;__i+=2){__coords.push([__pts[__i],__pts[__i+1]])}\nawait page.mouse.drag(__coords)\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           action +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true }))\n`
         )
@@ -1854,7 +1951,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const hasSelector = str(args.selector, '') !== ''
         const hasDelta = Number.isFinite(args.deltaX) || Number.isFinite(args.deltaY)
         if (!hasSelector && !hasDelta)
@@ -1866,7 +1963,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
               300,
             )})\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           action +
           `const __p = await page.info()\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, scrollX: __p.sx ?? null, scrollY: __p.sy ?? null }))\n`
@@ -1892,8 +1989,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) =>
-        `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+      buildScript: (args, exec) =>
+        `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
         `await page.locator(${j(str(args.selector, ''))}).setInputFiles(${j(
           str(args.path, ''),
         )})\n` +
@@ -1929,7 +2026,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const sel = str(args.triggerSelector, '')
         const script = str(args.triggerScript, '')
         const savePath = str(args.savePath, '')
@@ -1945,7 +2042,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             ? `    __path = await __dl.saveAs(${j(savePath)}).catch(() => null)\n`
             : `    __path = await __dl.path().catch(() => null)\n`
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           // Contract-adaptive download capture. Preferred path: Playwright-style
           // page.waitForEvent('download') (vendored runtime). On the app flavor
           // the event resolves into a shapeless object and the file lands in
@@ -2007,10 +2104,10 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         checked: { type: 'boolean', description: 'true=check (default), false=uncheck.' },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const chk = bool(args.checked, true)
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `await page.locator(${j(str(args.selector, ''))}).${chk ? 'check' : 'uncheck'}()\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, checked: ${chk} }))\n`
         )
@@ -2027,7 +2124,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         text: { type: 'string', description: 'Text to type into a prompt dialog.' },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const accept = bool(args.accept, true)
         const text = str(args.text, '')
         const params = `{ accept: ${accept}${
@@ -2037,7 +2134,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // JS is paused, so a Runtime.evaluate would hang. handleJavaScriptDialog
         // is a CDP command and works even under a blocking dialog.
         return (
-          `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}` +
+          `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}` +
           `const __r = await cdp("Page.handleJavaScriptDialog", ${params}).catch((e) => ({ error: String(e) }))\n` +
           `const __ok = !!(__r && !__r.error)\n` +
           `console.log('${SENTINEL}' + JSON.stringify({ ok: true, handled: __ok, accept: ${accept}, error: __r?.error ?? null }))\n`
@@ -2059,7 +2156,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         mode: { type: 'string', description: "'browser' (default) runs via the page context; 'server' uses Node-side fetch.server." },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const opts: Record<string, unknown> = {
           method: str(args.method, 'GET'),
           headers: args.headers && typeof args.headers === 'object' ? args.headers : {},
@@ -2067,7 +2164,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         }
         if (str(args.body, '') !== '') opts.body = str(args.body, '')
         const mode = str(args.mode, 'browser')
-        const pre = mode === 'server' ? '' : `${spaceArg(args.space, cfg.defaultSpace)}${ensureRealTab()}`
+        const pre = mode === 'server' ? '' : `${spaceArg(args.space, cfg, exec)}${ensureRealTab()}`
         return (
           `${pre}${SAFE_FN}` +
           `const __r = await fetch.${mode === 'server' ? 'server' : 'browser'}(${j(
@@ -2088,7 +2185,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       const def = defineTool({
         name: 'ego_cli',
         description:
-          'Escape hatch: run an arbitrary `ego-browser nodejs` heredoc script verbatim (facades page/browser/taskSpaces/site/fetch and the raw cdp() are preloaded). Use when the structured ego_* tools do not cover the task. Returns raw stdout plus the parsed console.log payload when present.',
+          'Escape hatch: run an arbitrary `ego-browser nodejs` heredoc script verbatim (facades page/browser/taskSpaces/site/fetch and the raw cdp() are preloaded). Use when the structured ego_* tools do not cover the task. Returns raw stdout plus the parsed console.log payload when present. SPACE BINDING: bare scripts have none — bind your space inside the script (await taskSpaces.useOrCreate(<name>)) and pass its numeric id to later ego_* calls; with multiple spaces open an unbound script fails with "Task space not selected".',
         parameters: {
           script: {
             type: 'string',
@@ -2144,8 +2241,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       parameters: {
         space: spaceParam,
       },
-      buildScript: (args) =>
-        buildTabListScript(spaceArg(args.space, cfg.defaultSpace)),
+      buildScript: (args, exec) =>
+        buildTabListScript(spaceArg(args.space, cfg, exec)),
     }),
   )
   reg(
@@ -2161,12 +2258,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const target = str(args.target, '')
         if (target === '') {
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_tab_switch requires a target' }))\n`
         }
-        return buildTabSwitchScript(spaceArg(args.space, cfg.defaultSpace), target)
+        return buildTabSwitchScript(spaceArg(args.space, cfg, exec), target)
       },
     }),
   )
@@ -2183,12 +2280,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const target = str(args.target, '')
         if (target === '') {
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_tab_close requires a target' }))\n`
         }
-        return buildTabCloseScript(spaceArg(args.space, cfg.defaultSpace), target)
+        return buildTabCloseScript(spaceArg(args.space, cfg, exec), target)
       },
     }),
   )
@@ -2212,9 +2309,9 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) =>
+      buildScript: (args, exec) =>
         buildScrollToBottomScript(
-          spaceArg(args.space, cfg.defaultSpace),
+          spaceArg(args.space, cfg, exec),
           str(args.selector, ''),
           num(args.maxScrolls, 30),
           num(args.settleMs, 600),
@@ -2241,10 +2338,10 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const state = str(args.state, 'load') === 'networkidle' ? 'networkidle' : 'load'
         return buildWaitPageScript(
-          spaceArg(args.space, cfg.defaultSpace),
+          spaceArg(args.space, cfg, exec),
           state,
           num(args.timeoutMs, 15000),
           num(args.idleMs, 500),
@@ -2269,13 +2366,13 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         space: spaceParam,
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const key = str(args.key, '')
         if (key === '') {
           return `console.log('${SENTINEL}' + JSON.stringify({ ok: false, reason: 'ego_dispatch_key requires a key' }))\n`
         }
         return buildDispatchKeyScript(
-          spaceArg(args.space, cfg.defaultSpace),
+          spaceArg(args.space, cfg, exec),
           key,
           str(args.selector, ''),
         )
@@ -2311,7 +2408,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
             "Task-space name to drive in (defaults to the default space; an explicit name is created/reused via useOrCreate so the site tool's openOrReuseTab has a selected space). Complete it with ego_space_close when the goal is done.",
         },
       },
-      buildScript: (args) => {
+      buildScript: (args, exec) => {
         const site = str(args.site, '')
         const tool = str(args.tool, '')
         if (site === '' || tool === '') {
@@ -2321,7 +2418,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         // pack), so the space is the tool's job, not an orphan risk: ALWAYS
         // useOrCreate (never the no-create fallback) so the pack has a space.
         const spacePrefix = useSpace(
-          str(args.space, '') !== '' ? (args.space as string) : cfg.defaultSpace,
+          str(args.space, '') !== '' ? (args.space as string) : defaultSpaceFor(cfg, exec),
         )
         return buildSiteToolScript(
           site,
@@ -2367,23 +2464,30 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: {
           type: 'string',
           description:
-            `Task-space name; defaults to the dedicated '${SEARCH_SPACE}' space (reused across calls; complete it with ego_space_close when the goal is done).`,
+            `Task-space name; defaults to a per-conversation search space ('${SEARCH_SPACE}@<this-agent>') so parallel conversations never share or auto-close each other's search space. Reused across calls; auto-completed after the run unless keep=true.`,
         },
         keep: {
           type: 'boolean',
           description:
-            `Keep the search space open after the run (default false). When false and the space is the dedicated '${SEARCH_SPACE}' one, the tool auto-completes it so it never leaks (the summary+citations are already returned, so the page is not needed). Set true to keep browsing from a citation link. A caller-passed non-default space is never auto-closed.`,
+            `Keep the search space open after the run (default false). When false and the space is a tool-owned '${SEARCH_SPACE}*' space, the tool auto-completes it so it never leaks (the summary+citations are already returned, so the page is not needed). Set true to keep browsing from a citation link. A caller-passed non-default space is never auto-closed.`,
         },
       },
-      buildScript: (args) => buildAiSearchScript(args, useSpace, ensureRealTab),
-      afterExecute: (args) => {
-        // Mark the resolved search space active so later browsing continuations
-        // land in it — BUT only when the tool did NOT auto-complete it. If it
-        // auto-closed (default keep=false on the dedicated space), record the
-        // close so the tracker doesn't point at a now-dead space.
-        const target = typeof args.space === 'string' && args.space !== '' ? args.space : SEARCH_SPACE
-        if (resolveAutoClose(target, bool(args.keep, false))) cfg.spaceTracker.closed(target, true)
-        else cfg.spaceTracker.selected(target)
+      buildScript: (args, exec) => buildAiSearchScript(args, useSpace, ensureRealTab, agentSearchSpace(exec)),
+      afterExecute: (args, value, exec) => {
+        // The search space is the TOOL's own (per-agent namespaced); it is not
+        // this conversation's default routing. Only touch this agent's tracker
+        // when a space was kept alive for a continuation (keep=true or an
+        // explicit non-auto-close space): an auto-completed space must NOT be
+        // recorded — and a default search run must NOT silently select/close
+        // anything, so parallel conversations never see each other's searches.
+        const target = typeof args.space === 'string' && args.space !== '' ? args.space : agentSearchSpace(exec)
+        if (resolveAutoClose(target, bool(args.keep, false))) {
+          // Undo the generic wrapper's selected(args.space) for the auto-close
+          // case (no-op when the name was never selected this conversation).
+          cfg.spaceTracker.for(exec?.agent).closed(target, true)
+          return
+        }
+        cfg.spaceTracker.for(exec?.agent).selected(target)
       },
     }),
   )
@@ -2403,19 +2507,26 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         space: {
           type: 'string',
           description:
-            `Task-space name; defaults to the dedicated '${SEARCH_SPACE}' space (reused across calls; complete it with ego_space_close when the goal is done).`,
+            `Task-space name; defaults to a per-conversation search space ('${SEARCH_SPACE}@<this-agent>') so parallel conversations never share or auto-close each other's search space. Reused across calls; auto-completed after the run unless keep=true.`,
         },
         keep: {
           type: 'boolean',
           description:
-            `Keep the search space open after the run (default false). When false and the space is the dedicated '${SEARCH_SPACE}' one, the tool auto-completes it so it never leaks. Set true to keep browsing from a result link. A caller-passed non-default space is never auto-closed.`,
+            `Keep the search space open after the run (default false). When false and the space is a tool-owned '${SEARCH_SPACE}*' space, the tool auto-completes it so it never leaks. Set true to keep browsing from a result link. A caller-passed non-default space is never auto-closed.`,
         },
       },
-      buildScript: (args) => buildPlainSearchScript(args, useSpace, ensureRealTab),
-      afterExecute: (args) => {
-        const target = typeof args.space === 'string' && args.space !== '' ? args.space : SEARCH_SPACE
-        if (resolveAutoClose(target, bool(args.keep, false))) cfg.spaceTracker.closed(target, true)
-        else cfg.spaceTracker.selected(target)
+      buildScript: (args, exec) => buildPlainSearchScript(args, useSpace, ensureRealTab, agentSearchSpace(exec)),
+      afterExecute: (args, value, exec) => {
+        // See web_ai_search: never touch this agent's tracker on auto-close,
+        // and never on a default (per-agent-namespaced) search run.
+        const target = typeof args.space === 'string' && args.space !== '' ? args.space : agentSearchSpace(exec)
+        if (resolveAutoClose(target, bool(args.keep, false))) {
+          // Undo the generic wrapper's selected(args.space) for the auto-close
+          // case (no-op when the name was never selected this conversation).
+          cfg.spaceTracker.for(exec?.agent).closed(target, true)
+          return
+        }
+        cfg.spaceTracker.for(exec?.agent).selected(target)
       },
     }),
   )
@@ -2430,7 +2541,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
       description:
         'Check the current page for a human-verification (CAPTCHA) challenge — reCAPTCHA / hCaptcha / Cloudflare / Turnstile — and return { detected, kind }. If detected=true, ALERT THE USER that they must complete the verification in the \'ego lite - agent\' browser window (it is the same live session shown in the watch panel), then continue after they have.',
       parameters: {
-        space: { type: 'string', description: 'Task-space name or numeric id; defaults to the configured defaultSpace.' },
+        space: { type: 'string', description: "Task-space name or numeric id; defaults to THIS conversation's active space (per-conversation state)." },
       },
       output: {
         schema: {
@@ -2450,7 +2561,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
           const result = await withWarmupRetry(() =>
             runEgoScript(
               ctx.subprocess,
-              humanCheckScript(str(args.space, cfg.defaultSpace)),
+              humanCheckScript(str(args.space, defaultSpaceFor(cfg, exec))),
               { signal: exec?.signal },
               cfg,
             ),
@@ -2592,7 +2703,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
       const def = defineTool({
         name: 'ego_script',
         description:
-          'Run an arbitrary `ego-browser nodejs` heredoc script in ONE invocation (same runtime/API as ego_cli: page/…locator/browser/taskSpaces/site/fetch/cdp preloaded), and return structured {ok, stdout, stderr, result, durationMs, timedOut}. Use for a full multi-step browser task as a single script.',
+          'Run an arbitrary `ego-browser nodejs` heredoc script in ONE invocation (same runtime/API as ego_cli: page/…locator/browser/taskSpaces/site/fetch/cdp preloaded), and return structured {ok, stdout, stderr, result, durationMs, timedOut}. Use for a full multi-step browser task as a single script. SPACE BINDING: bare scripts have none — bind your space inside the script (await taskSpaces.useOrCreate(<name>) or useOrCreateTaskSpace) and pass its numeric id to later ego_* calls; with multiple spaces open an unbound script fails with "Task space not selected" (official fail-closed guard).',
         parameters: {
           script: {
             type: 'string',

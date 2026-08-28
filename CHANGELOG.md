@@ -2,7 +2,44 @@
 
 所有对用户可见的变更集中在各版本号下。格式遵循 [Keep a Changelog](https://keepachangelog.com/)，版本语义遵循 [SemVer](http://semver.org/)。
 
-## [Unreleased]
+## [0.9.4] — 多会话空间隔离
+
+### 修复
+- **多会话空间串味（本版本核心，实测复现 → 修复 → 压测防回归）**：`createActiveSpaceTracker` 由插件级单槽 `activeSpace` 改为 per-agent 容器——以 `ToolRunContext.exec.agent` 为 WeakMap key，每个 DSH 会话独立维护「当前空间」；无 agent（单会话/直连）回退 shared 单槽。修复此前两个对话并行时，A 会话 open 后 B 会话不带 `space` 的调用静默落到 A 空间的 last-writer-wins 问题（含写入串味：`ego_click` 返回 ok:true 但点在别人空间；及 close 连带误报 `no active task space`）。
+- **搜索不再污染会话路由**：`web_ai_search` / `web_search_plain` 默认（无显式 `space`）不再更新 active-space tracker；默认搜索空间改为 per-agent 命名 `web-search@<agentShort>`（agent id 短哈希），auto-close 匹配从等值改为前缀 `web-search*`。显式传 `space` 时行为不变，auto-close 后补偿 `closed()` 防残留死路由。
+- **落点自检**：所有按空间路由的工具在返回体注入 `space: {id, name}`（脚本层 `@DSH_SPACE@` 回显行 → transport 解析），调用方每次都能确认真实落点。
+- **fail-closed 对齐官方**：`ego_script` / `ego_cli` 裸脚本无空间绑定时明确报 `Task space not selected`（工具描述写明需脚本内 `useOrCreateTaskSpace` 自行绑定）；`ego_space_open` 描述强调同名空间全局碰撞、建议以返回的数字 `id` 定位；`space` 参数描述统一为 per-conversation 语义。
+
+### 测试
+- vitest 60 → 118（9 文件）：active-space 语义重构为单槽 3 例 + per-agent 隔离 5 例（互不污染、close 不连带、实例复用、无 agent 回退 shared）+ 搜索空间语义 2 例；typecheck 零错误，tsdown 单产物 lib/index.js。
+- 真实双会话并发压测（双方全部不带 `space`，复现旧 bug 条件）：17 次默认路由调用零漂移、写入不串味、close 不连带、close 后对端正常路由——旧三大实证 bug 全部对照修复。
+
+## [0.9.3] — 官方 skill 41/41 全对齐
+
+### 新增
+- 补齐官方 SKILL.md v1.2.3 剩余能力，新增 12 个工具（32 → 44 个 `ego_*`）：
+  - 空间控制权五件套：`ego_space_list` / `ego_space_claim` / `ego_space_handoff` / `ego_space_takeover` / `ego_space_wait_control`——交接协议（handoff → 用户操作 → 明确确认后 takeover）落地为工具描述约束；wait_control 秒制参数换算毫秒制。
+  - 标签页三件套：`ego_tab_list` / `ego_tab_switch` / `ego_tab_close`（targetId / url 子串 / 标题子串 / 序号四种匹配）。
+  - `ego_scroll_to_bottom`（无限滚动）、`ego_wait_page`（load / networkidle 确定性自实现）、`ego_dispatch_key`（合成按键事件）、`ego_site_tool`（官方 learnings 站点经验包载体：google / github / x-com）。
+
+### 修复（全部实测复现 → 修复 → 防回归测试）
+- `runEgoScript` 的官方 `-e` 通道把整段脚本包进 async IIFE：`await` 永远合法（修复 `await (fn)()` 形态触发 `ReferenceError: await is not defined`），抛错自动走哨兵通道结构化上报。
+- 空间五件套 `__dshPick(...)` 缺调用括号导致 `await` 拿到函数本身、静默返回 `count:0` 假象；已修并加 arity-vs-array 防回归断言。
+- `ego_site_tool`：脚本实际在 App 进程执行、插件注入的 env 到不了——改为脚本内调用 `runSiteTool` 前显式设置 `EGO_BROWSER_AGENT_WORKSPACE`。
+- `ego_download`：双路径契约自适应（Playwright 事件路径优先，app flavor 事件残缺时轮询 `~/Downloads` 兜底）；新增 `captured` 字段诚实上报是否真的捕获到下载（programmatic blob 下载可能被 App 静默吞，属官方限制；真实下载/导航 attachment 可靠）。
+
+### 压测结论（官方 app flavor）
+CLI 链路 15 连发 0–1ms/次；工具级高频 5/5；空间开关环 8 对零残留；2 agent 并发只读 6+6 全绿、互斥锁无死锁；超时路径快速失败且错误信息完整。
+
+## [0.9.2] — 搜索空间自动收尾
+
+- `web_ai_search` / `web_search_plain` 自有的 `web-search` 任务空间在完成后 auto-complete 收尾，修复清理盲区（此前搜索空间会残留泄漏）。
+
+## [0.9.1] — 浏览器驱动搜索
+
+- 新增 `web_ai_search`（Google AI Mode `udm=50`：AI 合成摘要 + 引用一起返回，自动处理异步渲染、consent/区域墙、重试）与 `web_search_plain`（纯结果链接，更快更轻）。语言跟随查询内容，不硬编码 `hl`/`gl`；引用 DOM 固定 + 多级兜底，引用可能变少但永不丢。
+
+## [0.9.0]
 
 官方 ego lite App 引擎：优先驱动本机安装的官方 CLI（不再自带浏览器），vendored runtime 降级为无 App 环境的兜底。
 

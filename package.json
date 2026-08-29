@@ -19,7 +19,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "tsdown -c tsdown.config.ts"
+    "build": "tsdown -c tsdown.config.ts",
+    "prepare": "tsdown -c tsdown.config.ts"
   },
   "dependencies": {},
   "peerDependencies": {

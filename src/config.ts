@@ -22,6 +22,8 @@ export interface Config {
   maxOutputBytes?: number
   /** Kill grace for spawns (ms). */
   graceMs?: number
+  /** Default per-tool timeout (ms) for ego_* tools; a per-call override wins. */
+  toolTimeoutMs?: number
 }
 
 export const Config = z.object({
@@ -38,6 +40,7 @@ export const Config = z.object({
   egoBin: z.string().description('Explicit ego-browser binary path; empty = auto-detect via resolveEngine.'),
   maxOutputBytes: z.number().description('Cap on script stdout bytes collected before spilling to disk.'),
   graceMs: z.number().description('Kill grace for spawns (ms).'),
+  toolTimeoutMs: z.number().description('Default per-tool timeout (ms) for ego_* tools; a per-call override wins.'),
 })
 
 // ── user-defined extra CLI args ─────────────────────────────────────────────

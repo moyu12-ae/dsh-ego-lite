@@ -501,6 +501,8 @@ interface EgoRuntimeConfig {
   // Structural parity with ResolvedConfig (resolveEgoEnv takes the full type);
   // this mirrors the configured engineMode SETTING, not the detected flavor.
   readonly engineMode: ResolvedConfig['engineMode']
+  /** Default per-tool timeout (ms) applied to ego_* tools unless overridden. */
+  readonly toolTimeoutMs: number
 }
 
 interface ExecLike {
@@ -581,13 +583,13 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
                 'app',
                 `console.log('${SENTINEL}' + JSON.stringify({ ok: true, compat: 'app-facades-installed' }))\n`,
               ),
-              { timeoutMs: Math.min(TOOL_TIMEOUT_MS, 20_000) },
+              { timeoutMs: Math.min(cfg.toolTimeoutMs, 20_000) },
             )
             if (!boot.ok) throw new Error(boot.error ?? 'app facade compat failed to install')
           }
         }
         const r = await cfg.replSession.exec(script, {
-          timeoutMs: TOOL_TIMEOUT_MS,
+          timeoutMs: cfg.toolTimeoutMs,
           maxOutputBytes: cfg.maxOutputBytes,
           signal: exec.signal,
         })
@@ -843,7 +845,7 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
       schema: commonOutputSchema,
       render: renderText,
     },
-    timeoutMs: TOOL_TIMEOUT_MS,
+    timeoutMs: cfg.toolTimeoutMs,
     execute: async (args: Record<string, unknown>, exec: ToolExec) =>
       withEgoLock(async () => {
         const script = opts.buildScript(args, exec)
@@ -919,6 +921,7 @@ export function apply(ctx: EgoContext, config: ConfigInterface = {}): void {
     get defaultSpace() { return this.spaceTracker.shared.current() },
     maxOutputBytes: config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
     graceMs: config.graceMs ?? DEFAULT_GRACE_MS,
+    toolTimeoutMs: config.toolTimeoutMs ?? TOOL_TIMEOUT_MS,
     // Live getter: reads from the settings bridge so GUI edits take effect on
     // the next spawn without restarting the plugin.
     get chromePath() {
@@ -2208,7 +2211,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           },
           render: renderText,
         },
-        timeoutMs: TOOL_TIMEOUT_MS,
+        timeoutMs: cfg.toolTimeoutMs,
         execute: async (args: Record<string, unknown>, exec: ToolExec) => {
           const script = str(args.script, '')
           const result = await withWarmupRetry(() =>
@@ -2730,7 +2733,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
           },
           render: renderText,
         },
-        timeoutMs: TOOL_TIMEOUT_MS,
+        timeoutMs: cfg.toolTimeoutMs,
         execute: async (args: Record<string, unknown>, exec: ToolExec) => {
           const script = str(args.script, '')
           // Honor the documented per-run timeout override (integer ms). Falls

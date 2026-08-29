@@ -2,6 +2,23 @@
 
 所有对用户可见的变更集中在各版本号下。格式遵循 [Keep a Changelog](https://keepachangelog.com/)，版本语义遵循 [SemVer](http://semver.org/)。
 
+## [0.9.5] — 官方开发文档合规审计
+
+### 新增
+- **可调工具超时（配置·无硬编码可调参数原则）**：`TOOL_TIMEOUT_MS`(120s) 常量硬编码 → `toolTimeoutMs` 配置字段，5 处工具 `timeoutMs` 改 `cfg.toolTimeoutMs`（`ego_status`/`ego_download`/`ego_site_tool` 等）。端到端实测：config 字段 → `cfg.toolTimeoutMs` → `defineTool.timeoutMs` → harness 执行超时接线完整生效（2000ms 触发 `tool call timed out after 2000ms`）。
+- **Config schema 补全真实消费字段**：`defaultSpace` / `egoBin` / `maxOutputBytes` / `graceMs` 4 个已消费字段声明进 schema + `Config` 接口（9 字段全 optional），原 Schema 5 字段 vs 实际消费 9 字段对齐。
+- **`prepare` 脚本**：`"prepare": "tsdown -c tsdown.config.ts"`，修复 `github:owner/repo` 安装拉源码无 `lib/` 产物导致加载失败（打包文档 git 安装规范）。
+
+### 修复
+- **apply 参数类型与 schema 同步**：`apply(ctx, config: RawConfig={})` → `config: ConfigInterface`（与 schema `Config` 推断类型一致），移除 `as` 断言；动态索引改 `Record` 转换。schema 加字段时 apply 类型自动同步。
+- **`ctx.effect` 改为必选**：`ctx.effect?.()` → `ctx.effect()`（两处工具注册 disposer + graceful teardown、一处 settings），`types.ts` `EgoContext.effect` 改必选，资源 disposal 不再被可选链静默跳过；fake ctx 补 `effect` 防回归。
+
+### 测试
+- vitest 118 → 123（`config.test.ts` 追加 5 断言：正确类型、数字 defaultSpace、运行时拒错误类型、拒 `defaultSpace:{}`、枚举校验）；typecheck 零错误，tsdown 单产物 lib/index.js 154.84 kB。
+
+### 审计对照
+- 对照官方全量开发文档（Cordis 教程 7 章 + `/develop/basic/` 6 页：插件/tool/config/publish/framework/service/events/practice/llm-adapter）逐条核查，修复 2 项合规缺口：①缺少 `prepare` 脚本（git 安装）；②硬编码可调参数 `TOOL_TIMEOUT_MS`（配置原则）。另完成 apply 参数类型与 schema 对齐、`ctx.effect` 必选化。
+
 ## [0.9.4] — 多会话空间隔离
 
 ### 修复

@@ -94,7 +94,7 @@ export function installEgoBrowserSettings(ctx: EgoContext, entry: Record<string,
       if (isUnloading(ctx)) return
       notify()
     })
-    sctx.effect?.(() => () => {
+    sctx.effect(() => () => {
       offScopeWatch?.()
       sharedScope.refs = Math.max(0, sharedScope.refs - 1)
       if (sharedScope.refs === 0 && sharedScope.scope === scope) sharedScope.scope = null

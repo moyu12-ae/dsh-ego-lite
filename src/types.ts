@@ -82,7 +82,7 @@ export interface EgoContext {
   tools: ToolRegistrar
   subprocess: SubprocessService
   logger?: LoggerLike
-  effect?(fn: () => unknown, label?: string): unknown
+  effect(fn: () => unknown, label?: string): unknown
   inject?(services: readonly string[], fn: (sctx: EgoContext) => void): void
   on?(event: string, fn: (...args: unknown[]) => unknown): () => void
   settings?: SettingsService

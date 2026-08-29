@@ -932,7 +932,7 @@ export function apply(ctx: EgoContext, config: ConfigInterface = {}): void {
   const reg = (tool: ToolHandle): void => {
     const dispose = ctx.tools.register(tool) as unknown as () => void
     // Cordis lifecycle: unregister the tool when the plugin unmounts.
-    ctx.effect?.(() => dispose)
+    ctx.effect(() => dispose)
   }
   registerEgoStatus(ctx, cfg, reg)
   registerAuthFlush(ctx, cfg, reg)
@@ -947,7 +947,7 @@ export function apply(ctx: EgoContext, config: ConfigInterface = {}): void {
   // Losing in-memory login cookies on a dirty shutdown beats a restart that
   // never completes — the clean path still flushes cookies on a graceful DSH
   // close, and ego_auth_flush exists for explicit persistence.
-  ctx.effect?.(() => {
+  ctx.effect(() => {
     // App flavor: the browser belongs to the USER'S RUNNING ego lite app —
     // stopping it on plugin unload would close the user's own browsing and
     // contradicts "use the local app" entirely. Only the vendored flavor owns

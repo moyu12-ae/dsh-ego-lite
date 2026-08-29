@@ -137,17 +137,19 @@ describe("Config schema (composition layer)", () => {
     expect(Config({ defaultSpace: 7 }).defaultSpace).toBe(7);
   });
 
-  it("rejects wrong types for the new numeric fields", () => {
-    expect(() => Config({ maxOutputBytes: "8" })).toThrow();
-    expect(() => Config({ graceMs: "1000" })).toThrow();
+  it("rejects wrong types for the new numeric fields (runtime guard; TS already blocks at compile time)", () => {
+    // User config comes from cordis.yml JSON, which bypasses TS — the runtime
+    // schema must still reject a bad type.
+    expect(() => Config({ maxOutputBytes: "8" } as any)).toThrow();
+    expect(() => Config({ graceMs: "1000" } as any)).toThrow();
   });
 
-  it("rejects a bad defaultSpace type", () => {
-    expect(() => Config({ defaultSpace: {} })).toThrow();
+  it("rejects a bad defaultSpace type (runtime guard)", () => {
+    expect(() => Config({ defaultSpace: {} } as any)).toThrow();
   });
 
   it("keeps validating existing enums", () => {
     expect(Config({ engineMode: "app" }).engineMode).toBe("app");
-    expect(() => Config({ engineMode: "bad" })).toThrow();
+    expect(() => Config({ engineMode: "bad" } as any)).toThrow();
   });
 });

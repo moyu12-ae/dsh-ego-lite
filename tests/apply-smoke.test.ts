@@ -16,6 +16,7 @@ describe('apply() registration smoke', () => {
     const registered: string[] = []
     const ctx = {
       logger: { info: () => {}, warn: () => {}, error: () => {} },
+      effect: () => () => {},
       tools: {
         register(tool: { name?: string }) {
           registered.push(String(tool?.name))

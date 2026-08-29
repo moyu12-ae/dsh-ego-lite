@@ -3,6 +3,27 @@ import type { RawConfig, ResolvedConfig } from './types.ts'
 
 // Defaults live in resolveConfig so a persisted legacy value is not hidden by
 // a schema default before migration runs.
+//
+// Shared config interface — declared here (not in types.ts) so the composition
+// entry (cordis.patch.yml) AND the settings namespace validate against the same
+// field set. All fields are optional: the composition layer may omit any, and
+// apply() falls back to the module defaults declared in index.ts below.
+export interface Config {
+  chromePath?: string
+  egoCliArgs?: string
+  chromeArgs?: string
+  engineMode?: 'auto' | 'app' | 'vendored'
+  execSession?: 'auto' | 'persistent' | 'per-call'
+  /** Default task space for agents that omit `space`. */
+  defaultSpace?: string | number
+  /** Explicit ego-browser binary path; empty = auto-detect via resolveEngine. */
+  egoBin?: string
+  /** Cap on script stdout bytes collected before spilling to disk. */
+  maxOutputBytes?: number
+  /** Kill grace for spawns (ms). */
+  graceMs?: number
+}
+
 export const Config = z.object({
   chromePath: z.string().description('Path to Chrome/Chromium. Empty = auto-detect. (vendored runtime only)'),
   // User-defined extra CLI args. Shell-like tokenize; mutually-exclusive
@@ -11,6 +32,12 @@ export const Config = z.object({
   chromeArgs: z.string().description('Extra args appended to the Chrome launch argv (vendored runtime only). Takes effect on the next browser cold start (the browser is a singleton).'),
   engineMode: z.union(['auto', 'app', 'vendored']).description('CLI flavor: auto prefers the official ego lite app and falls back to the vendored runtime.'),
   execSession: z.union(['auto', 'persistent', 'per-call']).description('Execution channel for the official ego lite binary: auto/per-call spawn one `nodejs -e` eval per call (~0.4s full roundtrip, default); persistent OPTS INTO an experimental attached REPL session (requires a real TTY provider and is disabled by default).').default('auto'),
+  // Plugin-level fields, now validated by the same schema. apply() still falls
+  // back to the module defaults so a persisted legacy value is never hidden.
+  defaultSpace: z.union([z.string(), z.number()]).description('Default task space for agents that omit `space`.'),
+  egoBin: z.string().description('Explicit ego-browser binary path; empty = auto-detect via resolveEngine.'),
+  maxOutputBytes: z.number().description('Cap on script stdout bytes collected before spilling to disk.'),
+  graceMs: z.number().description('Kill grace for spawns (ms).'),
 })
 
 // ── user-defined extra CLI args ─────────────────────────────────────────────

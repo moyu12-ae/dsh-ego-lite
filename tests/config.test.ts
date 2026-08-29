@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveConfig, tokenizeArgs, filterArgs, EGO_CLI_BLOCKED, CHROME_BLOCKED } from "../src/config.ts";
+import { Config, resolveConfig, tokenizeArgs, filterArgs, EGO_CLI_BLOCKED, CHROME_BLOCKED } from "../src/config.ts";
 
 describe("engine config", () => {
   it("returns canonical defaults", () => {
@@ -110,5 +110,44 @@ describe("filterArgs", () => {
 
   it("returns [] when all args are blocked", () => {
     expect(filterArgs("--status --stop --help", EGO_CLI_BLOCKED)).toEqual([]);
+  });
+});
+
+// ── Config schema (composition layer + settings namespace) ──────────────────
+// Regression guard for the audit fix: the schema now DECLARES the plugin-level
+// fields apply() actually consumes (defaultSpace/egoBin/maxOutputBytes/graceMs),
+// so they are validated instead of silently passing through RawConfig.
+
+describe("Config schema (composition layer)", () => {
+  it("accepts the full plugin-level field set with correct types", () => {
+    const c = Config({
+      defaultSpace: "dsh-agent",
+      egoBin: "/usr/local/bin/ego",
+      maxOutputBytes: 1048576,
+      graceMs: 20000,
+      chromePath: "/Applications/Chrome",
+    });
+    expect(c.defaultSpace).toBe("dsh-agent");
+    expect(c.egoBin).toBe("/usr/local/bin/ego");
+    expect(c.maxOutputBytes).toBe(1048576);
+    expect(c.graceMs).toBe(20000);
+  });
+
+  it("accepts a numeric defaultSpace (space id form)", () => {
+    expect(Config({ defaultSpace: 7 }).defaultSpace).toBe(7);
+  });
+
+  it("rejects wrong types for the new numeric fields", () => {
+    expect(() => Config({ maxOutputBytes: "8" })).toThrow();
+    expect(() => Config({ graceMs: "1000" })).toThrow();
+  });
+
+  it("rejects a bad defaultSpace type", () => {
+    expect(() => Config({ defaultSpace: {} })).toThrow();
+  });
+
+  it("keeps validating existing enums", () => {
+    expect(Config({ engineMode: "app" }).engineMode).toBe("app");
+    expect(() => Config({ engineMode: "bad" })).toThrow();
   });
 });

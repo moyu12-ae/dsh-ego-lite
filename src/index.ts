@@ -40,7 +40,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { EGO_HELP_INDEX } from './help.ts'
 import { HUMAN_CHECK_PROBE } from './captcha.ts'
-import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
+import { Config as ConfigSchema, type Config as ConfigInterface, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
 import { installEgoBrowserSettings } from './settings.ts'
 import { resolveEngine, buildSpawnArgv, engineEnv, deriveSiteSkillsDir, type ResolvedEngine } from './engine.ts'
 import { ReplSession, replSupported } from './repl-session.ts'
@@ -873,7 +873,7 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
 }
 
 // ── plugin entry ────────────────────────────────────────────────────────────
-export function apply(ctx: EgoContext, config: RawConfig = {}): void {
+export function apply(ctx: EgoContext, config: ConfigInterface = {}): void {
   // Install the settings bridge first: the live config source (composition
   // entry + user-layer overrides) feeds `chromePath` + engine settings into cfg
   // via getters so every spawn reads the latest value without re-registration.
@@ -881,10 +881,11 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     'chromePath', 'egoCliArgs', 'chromeArgs',
     'engineMode', 'execSession',
   ]
-  const entry = Object.fromEntries(settingKeys.filter((key) => config[key] !== undefined).map((key) => [key, config[key]]))
+  const cfgRecord = config as Record<string, unknown>
+  const entry = Object.fromEntries(settingKeys.filter((key) => cfgRecord[key] !== undefined).map((key) => [key, cfgRecord[key]]))
   const bridge = installEgoBrowserSettings(ctx, entry)
 
-  const spaceTracker = createActiveSpaceTracker((config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE)
+  const spaceTracker = createActiveSpaceTracker(config.defaultSpace ?? DEFAULT_SPACE)
   const initialResolved = resolveConfig(bridge.source() as RawConfig)
   // Engine detection runs once per mount: app flavor (official ego lite) is
   // preferred; config can force 'app'|'vendored'; a configured egoBin wins.
@@ -910,14 +911,14 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     replFailures: 0,
     replDisabled: false,
     engineMode: initialResolved.engineMode,
-    configuredDefaultSpace: (config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE,
+    configuredDefaultSpace: config.defaultSpace ?? DEFAULT_SPACE,
     spaceTracker,
     // Fallback view (shared tracker) — only used by logs and no-exec contexts.
     // Tool calls MUST go through spaceArg/defaultSpaceFor(cfg, exec) so the
     // per-agent tracker is consulted instead.
     get defaultSpace() { return this.spaceTracker.shared.current() },
-    maxOutputBytes: (config.maxOutputBytes as number | undefined) ?? DEFAULT_MAX_OUTPUT_BYTES,
-    graceMs: (config.graceMs as number | undefined) ?? DEFAULT_GRACE_MS,
+    maxOutputBytes: config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+    graceMs: config.graceMs ?? DEFAULT_GRACE_MS,
     // Live getter: reads from the settings bridge so GUI edits take effect on
     // the next spawn without restarting the plugin.
     get chromePath() {
